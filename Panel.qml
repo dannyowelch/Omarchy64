@@ -250,7 +250,7 @@ Panel {
         var path = String(text || "").trim()
         if (!path) return
         if (root.browseThen === "drive8") {
-          root.pendingReopen = true
+          root.pendingReopen = !root.isPlaying
           root.runCtl(["drive8", path])
         } else {
           root.launchPath(path)

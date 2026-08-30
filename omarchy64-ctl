@@ -689,10 +689,24 @@ cmd_eject() {
 
 cmd_browse() {
   need zenity
-  local state dir picked disks=0 title filter
+  local state dir picked disks=0 title filter start disk
   state="$(read_state)"
   dir="$(games_dir_from "$state")"
   mkdir -p "$dir"
+  start="$dir/"
+  disk="$(jq -r '.drive8 // empty' <<<"$state")"
+  disk="${disk/#\~/$HOME}"
+  if [[ -n $disk && -f $disk ]]; then
+    # Open in the current disk's folder with that file selected, so
+    # multi-disk games in a subdirectory are one click away.
+    start="$disk"
+  else
+    local parent
+    parent="$(dirname "$disk")"
+    if [[ -n $disk && -d $parent ]]; then
+      start="$parent/"
+    fi
+  fi
   if [[ ${1:-} == --disks ]]; then
     disks=1
   fi
@@ -706,7 +720,7 @@ cmd_browse() {
   set +e
   picked="$(zenity --file-selection \
     --title="$title" \
-    --filename="$dir/" \
+    --filename="$start" \
     --file-filter="$filter" \
     --file-filter="All files | *" 2>/dev/null)"
   local rc=$?
