@@ -602,7 +602,7 @@ Panel {
             Text {
               width: parent.width
               wrapMode: Text.WordWrap
-              text: "Drive 8 sets the disk. Load runs it. BASIC starts at READY. with the disk attached."
+              text: "Drive 8 sets the disk. Load runs it. BASIC starts at READY. Pads use stick or D-pad plus fire; keyboard is arrows and Space."
               color: root.contentDim
               font.family: root.contentFontFamily
               font.pixelSize: Style.font.caption

@@ -60,7 +60,7 @@ omarchy plugin enable io.github.dannyowelch.omarchy64 --section right
 
 Keyboard in the panel: `j` / `k` moves, `d` Drive 8, `l` Load, `b` BASIC, Esc closes.
 
-While VICE is focused, a USB pad is the joystick. With **Keyboard**, VICE Keyset A is arrows plus Ctrl as fire.
+While VICE is focused, a USB pad is the joystick (stick or D-pad, plus fire on the first buttons). Changing joystick or port in the panel applies immediately if VICE is already running. **Keyboard** is arrows plus Space.
 
 Summon from a bind:
 
@@ -84,7 +84,7 @@ CLI (same binary the panel runs):
 | Setting | Default | Notes |
 |---------|---------|--------|
 | Workspace | `64` | Dedicated Hyprland workspace |
-| Joystick | Auto | First `/dev/input/js*` or `*-event-joystick`; otherwise keyboard |
+| Joystick | Auto | First SDL pad (stick/hat + fire); otherwise arrows + Space. Live-applied while VICE is running. |
 | C64 port | 2 | Most games; Port 1 is the exception |
 | Video | PAL | NTSC uses `-ntsc`; switching while VICE is open restarts it |
 | Warp load | on | `-autostart-warp` on **Load "*",8,1** only |
