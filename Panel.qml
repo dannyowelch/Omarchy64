@@ -160,7 +160,6 @@ Panel {
     else if (kind === "joystick") joystickBox.toggle()
     else if (kind === "port") setPref("joystickPort", Model.nextPort(status.joystickPort))
     else if (kind === "video") setPref("video", Model.nextVideo(status.video))
-    else if (kind === "install") runCtl(["install-emu"])
     else if (kind === "quit") quitEmu()
   }
 
@@ -394,22 +393,20 @@ Panel {
             Text {
               width: parent.width
               wrapMode: Text.WordWrap
-              text: "VICE is not installed. Omarchy64 uses the SDL2 build so gamepads and a dedicated workspace work without GTK chrome."
+              text: "VICE is not installed. The SDL2 package is the one this plugin launches:"
               color: root.contentForeground
               font.family: root.contentFontFamily
               font.pixelSize: Style.font.body
             }
 
-            Button {
+            Text {
               width: parent.width
-              text: "Install vice-sdl2"
-              bordered: true
-              hasCursor: root.hasCursorKind("install")
-              foreground: root.contentForeground
-              fontFamily: root.contentFontFamily
-              enabled: !root.busy
-              onHovered: function(h) { if (h) root.focusKind("install") }
-              onClicked: root.runCtl(["install-emu"])
+              wrapMode: Text.WrapAnywhere
+              text: "omarchy pkg add vice-sdl2"
+              color: root.contentForeground
+              font.family: root.contentFontFamily
+              font.pixelSize: Style.font.body
+              font.bold: true
             }
           }
 

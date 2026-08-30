@@ -132,10 +132,7 @@ function drive8Label(status) {
 function cursorItems(status) {
   var items = []
   var found = status && status.emulator && status.emulator.found
-  if (!found) {
-    items.push({ kind: "install" })
-    return items
-  }
+  if (!found) return items
   items.push({ kind: "drive8" })
   if (status.drive8) items.push({ kind: "eject" })
   items.push({ kind: "play" })
