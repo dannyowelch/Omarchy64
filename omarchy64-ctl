@@ -1,0 +1,672 @@
+#!/usr/bin/env bash
+# Launch VICE with a C64 image, joystick mapping, and a Hyprland workspace.
+
+set -euo pipefail
+
+PLUGIN_ID="io.github.dannyowelch.omarchy64"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
+STATE_FILE="$STATE_DIR/omarchy64.json"
+RULES_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/toggles/hypr/omarchy64.lua"
+DEFAULT_GAMES_DIR="$HOME/Games/C64"
+
+MONITOR_HOST="127.0.0.1"
+MONITOR_PORT="6510"
+
+usage() {
+  cat <<USAGE
+Usage: omarchy64-ctl <status|launch|play-last|basic|drive8|eject|quit|browse|set|ensure-rules|install-emu> [arg]
+
+Launch VICE (x64sc / x64).
+  launch [image]   RUN the disk in drive 8, or IMAGE if given
+  basic            READY. prompt; attaches drive 8 if a disk is set
+  drive8 [image]   Set/attach a disk; does not start VICE
+  eject            Empty drive 8
+  browse [--disks] File chooser starting in ~/Games/C64
+USAGE
+}
+
+fail() {
+  echo "omarchy64-ctl: $*" >&2
+  exit 1
+}
+
+need() {
+  command -v "$1" >/dev/null || fail "missing $1"
+}
+
+default_state() {
+  jq -nc --arg gamesDir "$DEFAULT_GAMES_DIR" '{
+    gamesDir: $gamesDir,
+    workspace: "64",
+    joystickPort: 2,
+    joystick: "auto",
+    fullscreen: false,
+    warp: true,
+    video: "pal",
+    recents: [],
+    lastPid: 0,
+    lastImage: "",
+    lastMode: "",
+    drive8: ""
+  }'
+}
+
+read_state() {
+  mkdir -p "$STATE_DIR"
+  if [[ -f $STATE_FILE ]]; then
+    jq -c '
+      .gamesDir = (.gamesDir // "") |
+      .workspace = (.workspace // "64") |
+      .joystickPort = (.joystickPort // 2) |
+      .joystick = (.joystick // "auto") |
+      .fullscreen = (.fullscreen // false) |
+      .warp = (.warp != false) |
+      .video = (if .video == "ntsc" then "ntsc" else "pal" end) |
+      .recents = (.recents // []) |
+      .lastPid = (.lastPid // 0) |
+      .lastImage = (.lastImage // "") |
+      .lastMode = (.lastMode // "") |
+      .drive8 = (.drive8 // "")
+    ' "$STATE_FILE" 2>/dev/null || default_state
+  else
+    default_state
+  fi
+}
+
+write_state() {
+  mkdir -p "$STATE_DIR"
+  local tmp
+  tmp="$(mktemp "$STATE_DIR/omarchy64.XXXXXX")"
+  printf '%s\n' "$1" >"$tmp"
+  mv "$tmp" "$STATE_FILE"
+}
+
+games_dir_from() {
+  local dir
+  dir="$(jq -r '.gamesDir // empty' <<<"$1")"
+  [[ -n $dir ]] || dir="$DEFAULT_GAMES_DIR"
+  dir="${dir/#\~/$HOME}"
+  printf '%s\n' "$dir"
+}
+
+find_emulator() {
+  local bin ui
+  for bin in x64sc x64; do
+    if command -v "$bin" >/dev/null; then
+      ui="unknown"
+      if ldd "$(command -v "$bin")" 2>/dev/null | grep -q 'libSDL2'; then
+        ui="sdl2"
+      elif ldd "$(command -v "$bin")" 2>/dev/null | grep -q 'libgtk'; then
+        ui="gtk3"
+      fi
+      jq -nc --arg binary "$(command -v "$bin")" --arg name "$bin" --arg ui "$ui" \
+        '{found:true,binary:$binary,name:$name,ui:$ui,packageHint:"vice-sdl2"}'
+      return 0
+    fi
+  done
+  jq -nc '{found:false,binary:"",name:"",ui:"",packageHint:"vice-sdl2"}'
+}
+
+pid_alive() {
+  local pid="${1:-0}"
+  [[ $pid =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ -d /proc/$pid ]] || return 1
+  local comm
+  comm="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+  [[ $comm == x64sc || $comm == x64 ]]
+}
+
+running_pid() {
+  local state="$1"
+  local pid
+  pid="$(jq -r '.lastPid // 0' <<<"$state")"
+  if pid_alive "$pid"; then
+    printf '%s\n' "$pid"
+    return 0
+  fi
+  pid="$(pgrep -n -x x64sc 2>/dev/null || true)"
+  [[ -n $pid ]] || pid="$(pgrep -n -x x64 2>/dev/null || true)"
+  [[ -n $pid ]] && printf '%s\n' "$pid"
+}
+
+list_joysticks_json() {
+  python3 - "$@" <<'PY'
+import json, os, glob
+
+def read(path):
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+pads = []
+seen = set()
+
+def add(ident, index, name):
+    if ident in seen:
+        return
+    seen.add(ident)
+    pads.append({
+        "id": ident,
+        "index": index,
+        "joydev": 4 + index,
+        "name": name or f"Joystick {index}",
+    })
+
+js_nodes = sorted(glob.glob("/dev/input/js*"))
+for i, node in enumerate(js_nodes):
+    num = node.rsplit("js", 1)[-1]
+    if not num.isdigit():
+        continue
+    name = read(f"/sys/class/input/js{num}/device/name") or read(f"/sys/class/input/js{num}/device/uniq")
+    add(f"hid{int(num)}", int(num), name)
+
+if not pads:
+    for i, node in enumerate(sorted(glob.glob("/dev/input/by-id/*-event-joystick"))):
+        name = os.path.basename(node).replace("-event-joystick", "").replace("-", " ")
+        add(f"hid{i}", i, name)
+
+print(json.dumps(pads))
+PY
+}
+
+ensure_rules() {
+  mkdir -p "$(dirname "$RULES_FILE")"
+  if [[ -f $RULES_FILE ]]; then
+    return 0
+  fi
+  cat >"$RULES_FILE" <<'LUA'
+-- Written by io.github.dannyowelch.omarchy64
+-- Keep VICE opaque and stop the idle lock while a game is focused.
+o.window("^(x64sc|x64|VICE)$", {
+  tag = "-default-opacity",
+  content = "game",
+  idle_inhibit = "focus",
+})
+LUA
+}
+
+resolve_joydev() {
+  local joystick="$1" pads_json="$2"
+  case "$joystick" in
+  none) echo 0 ;;
+  keyset) echo 2 ;;
+  auto)
+    if [[ $(jq 'length' <<<"$pads_json") -gt 0 ]]; then
+      jq -r '.[0].joydev' <<<"$pads_json"
+    else
+      echo 2
+    fi
+    ;;
+  hid*)
+    local mapped
+    mapped="$(jq -r --arg id "$joystick" 'map(select(.id == $id)) | .[0].joydev // empty' <<<"$pads_json")"
+    if [[ -n $mapped ]]; then
+      echo "$mapped"
+    else
+      echo 4
+    fi
+    ;;
+  *)
+    echo 4
+    ;;
+  esac
+}
+
+vice_monitor() {
+  python3 - "$MONITOR_HOST" "$MONITOR_PORT" "$@" <<'PY'
+import socket, sys, time
+
+host, port = sys.argv[1], int(sys.argv[2])
+cmds = sys.argv[3:]
+if not cmds:
+    sys.exit(2)
+try:
+    sock = socket.create_connection((host, port), 1.5)
+except OSError as exc:
+    print(f"monitor: {exc}", file=sys.stderr)
+    sys.exit(1)
+sock.settimeout(1.0)
+
+def recv():
+    try:
+        return sock.recv(16384)
+    except TimeoutError:
+        return b""
+
+recv()
+for cmd in cmds:
+    sock.sendall((cmd + "\n").encode("utf-8", "replace"))
+    time.sleep(0.08)
+    recv()
+sock.sendall(b"x\n")
+time.sleep(0.08)
+recv()
+sock.close()
+PY
+}
+
+vice_args() {
+  local mode="$1" image="$2" state="$3" pads_json="$4"
+  local port joystick warp video joydev other
+  port="$(jq -r '.joystickPort // 2' <<<"$state")"
+  [[ $port == 1 ]] || port=2
+  joystick="$(jq -r '.joystick // "auto"' <<<"$state")"
+  warp="$(jq -r '.warp' <<<"$state")"
+  video="$(jq -r '.video // "pal"' <<<"$state")"
+  joydev="$(resolve_joydev "$joystick" "$pads_json")"
+  if [[ $port == 1 ]]; then
+    other=2
+  else
+    other=1
+  fi
+
+  local -a args=()
+  args+=("-controlport${port}device" "1")
+  args+=("-controlport${other}device" "0")
+  args+=("-joydev${port}" "$joydev")
+  args+=("-joydev${other}" "0")
+  if [[ $video == ntsc ]]; then
+    args+=("-ntsc")
+  else
+    args+=("-pal")
+  fi
+  args+=("-remotemonitor")
+  args+=("-remotemonitoraddress" "ip4://${MONITOR_HOST}:${MONITOR_PORT}")
+
+  local drive8
+  drive8="$(jq -r '.drive8 // empty' <<<"$state")"
+  drive8="${drive8/#\~/$HOME}"
+
+  case "$mode" in
+  autostart)
+    [[ -n $image ]] || fail "no image to autostart"
+    if [[ $warp == true ]]; then
+      args+=("-autostart-warp")
+    fi
+    local ext="${image##*.}"
+    ext="${ext,,}"
+    case "$ext" in
+    crt) args+=("-cartcrt" "$image") ;;
+    *) args+=("-autostart" "$image") ;;
+    esac
+    ;;
+  drive8)
+    [[ -n $image ]] || fail "no disk for drive 8"
+    args+=("-8" "$image")
+    ;;
+  basic)
+    if [[ -n $drive8 && -f $drive8 ]]; then
+      args+=("-8" "$drive8")
+    fi
+    ;;
+  *) fail "unknown launch mode: $mode" ;;
+  esac
+  printf '%s\0' "${args[@]}"
+}
+
+# Hyprland 0.55+ exec is Lua: hl.dsp.exec_cmd(cmd, rules?). The old
+# `hyprctl dispatch exec "[workspace 64] cmd"` form is a syntax error.
+lua_long_string() {
+  local s="$1" n=""
+  while true; do
+    local open="[${n}[" close="]${n}]"
+    [[ $s != *"$close"* ]] && { printf '%s%s%s' "$open" "$s" "$close"; return; }
+    n="${n}="
+  done
+}
+
+hypr_exec() {
+  shift
+  local cmd quoted out
+  cmd="$(printf '%q ' "$@")"
+  cmd="${cmd% }"
+  quoted="$(lua_long_string "$cmd")"
+  if ! out="$(hyprctl dispatch "hl.dsp.exec_cmd(${quoted}, { workspace = \"64\" })" 2>&1)"; then
+    fail "hyprctl exec failed: $out"
+  fi
+}
+
+focus_workspace() {
+  hyprctl dispatch 'hl.dsp.focus({ workspace = 64 })' >/dev/null || true
+}
+
+record_session() {
+  local state="$1" mode="$2" image="$3" pid="${4:-0}"
+  local recents="$state"
+  if [[ -n $image && $mode == autostart ]]; then
+    recents="$(jq -c --arg path "$image" --arg file "$(basename "$image")" --arg ext "${image##*.}" '
+      ($ext | ascii_downcase) as $e |
+      (.recents // [])
+      | map(select(.path != $path))
+      | [{path:$path, file:$file, ext:$e}] + .
+      | .[:12]
+    ' <<<"$state")"
+  else
+    recents="$(jq -c '.recents // []' <<<"$state")"
+  fi
+  jq -c \
+    --argjson recents "$recents" \
+    --arg mode "$mode" \
+    --arg image "$image" \
+    --argjson pid "$pid" '
+      .recents = $recents
+      | .lastMode = $mode
+      | .lastImage = $image
+      | .lastPid = $pid
+      | .drive8 = (if $mode == "drive8" then $image
+                   elif $mode == "autostart" and ($image | test("\\.(d64|g64|d71|d81|d80|d82|x64)$"; "i")) then $image
+                   else (.drive8 // "") end)
+    ' <<<"$state"
+}
+
+emit_status() {
+  local state emu pads games_dir pid image title mode drive8
+  state="$(read_state)"
+  emu="$(find_emulator)"
+  pads="$(list_joysticks_json)"
+  games_dir="$(games_dir_from "$state")"
+  mkdir -p "$games_dir"
+  pid="$(running_pid "$state" || true)"
+  image=""
+  title=""
+  mode=""
+  drive8="$(jq -r '.drive8 // empty' <<<"$state")"
+  if [[ -n ${pid:-} ]]; then
+    image="$(jq -r '.lastImage // empty' <<<"$state")"
+    mode="$(jq -r '.lastMode // empty' <<<"$state")"
+    [[ -n $image ]] && title="$(basename "$image")"
+  else
+    pid=0
+  fi
+  jq -nc \
+    --argjson emulator "$emu" \
+    --argjson joysticks "$pads" \
+    --arg gamesDir "$games_dir" \
+    --argjson gamesDirExists "$([[ -d $games_dir ]] && echo true || echo false)" \
+    --argjson joystickPort "$(jq -r '.joystickPort' <<<"$state")" \
+    --arg joystick "$(jq -r '.joystick' <<<"$state")" \
+    --argjson warp "$(jq -r '.warp' <<<"$state")" \
+    --arg video "$(jq -r '.video' <<<"$state")" \
+    --arg drive8 "$drive8" \
+    --arg lastMode "$(jq -r '.lastMode' <<<"$state")" \
+    --argjson pid "${pid:-0}" \
+    --arg image "$image" \
+    --arg title "$title" \
+    --arg mode "$mode" \
+    '{
+      emulator: $emulator,
+      running: {active: ($pid > 0), pid: $pid, image: $image, title: $title, mode: $mode},
+      gamesDir: $gamesDir,
+      gamesDirExists: $gamesDirExists,
+      joystickPort: $joystickPort,
+      joystick: $joystick,
+      warp: $warp,
+      video: $video,
+      drive8: $drive8,
+      lastMode: $lastMode,
+      joysticks: $joysticks,
+      lastError: ""
+    }'
+}
+
+quit_emu() {
+  local state pid
+  state="$(read_state)"
+  pid="$(running_pid "$state" || true)"
+  if [[ -n ${pid:-} ]]; then
+    kill "$pid" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+      pid_alive "$pid" || break
+      sleep 0.1
+    done
+    pid_alive "$pid" && kill -9 "$pid" 2>/dev/null || true
+  fi
+  write_state "$(jq -c '.lastPid = 0' <<<"$state")"
+}
+
+start_vice() {
+  local mode="$1" image="${2:-}"
+  local state emu binary pads
+  state="$(read_state)"
+  image="${image/#\~/$HOME}"
+  if [[ -n $image ]]; then
+    [[ -f $image ]] || fail "image not found: $image"
+  fi
+
+  emu="$(find_emulator)"
+  [[ $(jq -r .found <<<"$emu") == true ]] || fail "VICE is not installed. Run: omarchy pkg add vice-sdl2"
+  binary="$(jq -r .binary <<<"$emu")"
+  pads="$(list_joysticks_json)"
+  ensure_rules
+  mkdir -p "${XDG_STATE_HOME:-$HOME/.local/state}/vice" \
+    "${XDG_CONFIG_HOME:-$HOME/.config}/vice"
+
+  quit_emu || true
+  state="$(read_state)"
+
+  local -a args=("$binary")
+  local arg
+  while IFS= read -r -d '' arg; do
+    args+=("$arg")
+  done < <(vice_args "$mode" "$image" "$state" "$pads")
+
+  local -a wrapped=()
+  if command -v uwsm-app >/dev/null; then
+    wrapped=(uwsm-app -- "${args[@]}")
+  else
+    wrapped=("${args[@]}")
+  fi
+
+  need hyprctl
+  hypr_exec 64 "${wrapped[@]}"
+  focus_workspace
+
+  local pid=0
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    sleep 0.15
+    pid="$(pgrep -n -x "$(basename "$binary")" 2>/dev/null || true)"
+    [[ -n $pid ]] && break
+  done
+  [[ -n $pid ]] || pid=0
+  write_state "$(record_session "$state" "$mode" "$image" "$pid")"
+  if [[ $pid == 0 ]]; then
+    fail "VICE did not start"
+  fi
+  emit_status
+}
+
+is_disk_image() {
+  local ext="${1##*.}"
+  ext="${ext,,}"
+  [[ $ext =~ ^(d64|g64|d71|d81|d80|d82|x64)$ ]]
+}
+
+cmd_launch() {
+  local image="${1:-}"
+  local state ext
+  state="$(read_state)"
+  if [[ -z $image ]]; then
+    image="$(jq -r '.drive8 // empty' <<<"$state")"
+  fi
+  if [[ -z $image ]]; then
+    image="$(jq -r '.lastImage // empty' <<<"$state")"
+  fi
+  [[ -n $image ]] || fail "no disk in drive 8"
+  image="${image/#\~/$HOME}"
+  ext="${image##*.}"
+  ext="${ext,,}"
+  [[ $ext =~ ^(prg|crt|d64|g64|tap|t64|d71|d81|d80|d82|x64)$ ]] || fail "unsupported image type: .$ext"
+  start_vice autostart "$image"
+}
+
+cmd_basic() {
+  start_vice basic ""
+}
+
+cmd_drive8() {
+  local image="${1:-}" ext pid
+  [[ -n $image ]] || fail "no disk for drive 8"
+  image="${image/#\~/$HOME}"
+  [[ -f $image ]] || fail "image not found: $image"
+  is_disk_image "$image" || fail "Drive 8 needs a disk image (.d64, .g64, .d71, .d81)"
+
+  local state
+  state="$(read_state)"
+  write_state "$(jq -c --arg image "$image" '.drive8 = $image' <<<"$state")"
+  state="$(read_state)"
+  pid="$(running_pid "$state" || true)"
+  if [[ -n ${pid:-} ]]; then
+    local quoted="${image//\\/\\\\}"
+    quoted="${quoted//\"/\\\"}"
+    vice_monitor "attach \"$quoted\" 8" || fail "VICE is running but the disk could not be attached. Try F12 → Drive."
+  fi
+  emit_status
+}
+
+cmd_eject() {
+  local state pid
+  state="$(read_state)"
+  pid="$(running_pid "$state" || true)"
+  if [[ -n ${pid:-} ]]; then
+    vice_monitor "detach 8" || true
+  fi
+  write_state "$(jq -c '.drive8 = ""' <<<"$state")"
+  emit_status
+}
+
+cmd_browse() {
+  need zenity
+  local state dir picked disks=0 title filter
+  state="$(read_state)"
+  dir="$(games_dir_from "$state")"
+  mkdir -p "$dir"
+  if [[ ${1:-} == --disks ]]; then
+    disks=1
+  fi
+  if (( disks )); then
+    title="Drive 8"
+    filter="Disk images | *.d64 *.D64 *.g64 *.G64 *.d71 *.D71 *.d81 *.D81 *.d80 *.D80 *.d82 *.D82"
+  else
+    title='Load "*",8,1'
+    filter="C64 images | *.prg *.PRG *.crt *.CRT *.d64 *.D64 *.g64 *.G64 *.tap *.TAP *.t64 *.T64"
+  fi
+  set +e
+  picked="$(zenity --file-selection \
+    --title="$title" \
+    --filename="$dir/" \
+    --file-filter="$filter" \
+    --file-filter="All files | *" 2>/dev/null)"
+  local rc=$?
+  set -e
+  [[ $rc -eq 0 && -n $picked ]] || exit 1
+  printf '%s\n' "$picked"
+}
+
+cmd_browse_dir() {
+  need zenity
+  local state dir picked
+  state="$(read_state)"
+  dir="$(games_dir_from "$state")"
+  mkdir -p "$dir"
+  set +e
+  picked="$(zenity --file-selection --directory \
+    --title="C64 library folder" \
+    --filename="$dir/" 2>/dev/null)"
+  local rc=$?
+  set -e
+  [[ $rc -eq 0 && -n $picked ]] || exit 1
+  write_state "$(jq -c --arg dir "$picked" '.gamesDir = $dir' <<<"$state")"
+  printf '%s\n' "$picked"
+}
+
+cmd_set() {
+  local key="${1:-}" value="${2:-}"
+  [[ -n $key ]] || fail "set requires a key"
+  local state pid=0
+  state="$(read_state)"
+  case "$key" in
+  gamesDir)
+    value="${value/#\~/$HOME}"
+    [[ -n $value ]] || fail "gamesDir is empty"
+    mkdir -p "$value"
+    state="$(jq -c --arg v "$value" '.gamesDir = $v' <<<"$state")"
+    ;;
+  joystickPort)
+    [[ $value == 1 || $value == 2 ]] || fail "joystickPort must be 1 or 2"
+    state="$(jq -c --argjson v "$value" '.joystickPort = $v' <<<"$state")"
+    ;;
+  joystick)
+    [[ -n $value ]] || fail "joystick is empty"
+    state="$(jq -c --arg v "$value" '.joystick = $v' <<<"$state")"
+    ;;
+  video)
+    [[ $value == pal || $value == ntsc ]] || fail "video must be pal or ntsc"
+    state="$(jq -c --arg v "$value" '.video = $v' <<<"$state")"
+    write_state "$state"
+    pid="$(running_pid "$state" || true)"
+    if [[ -n ${pid:-} ]]; then
+      local mode image
+      mode="$(jq -r '.lastMode // "basic"' <<<"$state")"
+      image="$(jq -r '.lastImage // empty' <<<"$state")"
+      case "$mode" in
+      autostart) start_vice autostart "$image" ;;
+      *) start_vice basic "" ;;
+      esac
+      return 0
+    fi
+    emit_status
+    return 0
+    ;;
+  warp)
+    case "$value" in
+    true|false|1|0|on|off|toggle) ;;
+    *) fail "$key must be true, false, or toggle" ;;
+    esac
+    if [[ $value == toggle ]]; then
+      state="$(jq -c --arg k "$key" '.[$k] = ((.[$k] // false) | not)' <<<"$state")"
+    else
+      local bool=false
+      [[ $value == true || $value == 1 || $value == on ]] && bool=true
+      state="$(jq -c --arg k "$key" --argjson v "$bool" '.[$k] = $v' <<<"$state")"
+    fi
+    ;;
+  *) fail "unknown setting: $key" ;;
+  esac
+  write_state "$state"
+  emit_status
+}
+
+cmd_install_emu() {
+  local cmd="omarchy pkg add vice-sdl2"
+  if command -v xdg-terminal-exec >/dev/null; then
+    xdg-terminal-exec bash -lc "$cmd; echo; read -r -p 'Press enter to close. '" &
+    disown
+  elif command -v alacritty >/dev/null; then
+    alacritty -e bash -lc "$cmd; echo; read -r -p 'Press enter to close. '" &
+    disown
+  else
+    fail "open a terminal and run: $cmd"
+  fi
+  echo '{"ok":true}'
+}
+
+cmd="${1:-}"
+shift || true
+case "$cmd" in
+status) emit_status ;;
+launch) cmd_launch "${1:-}" ;;
+play-last) cmd_launch "" ;;
+basic) cmd_basic ;;
+drive8) cmd_drive8 "${1:-}" ;;
+eject) cmd_eject ;;
+quit) quit_emu; emit_status ;;
+browse) cmd_browse "${1:-}" ;;
+browse-dir) cmd_browse_dir ;;
+set) cmd_set "${1:-}" "${2:-}" ;;
+ensure-rules) ensure_rules; echo '{"ok":true}' ;;
+install-emu) cmd_install_emu ;;
+-h|--help|"") usage ;;
+*) fail "unknown command: $cmd" ;;
+esac

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.dannyowelch.omarchy64",
+  "name": "Omarchy64",
+  "version": "0.1.0",
+  "author": "dannyowelch",
+  "license": "MIT",
+  "description": "Launch VICE C64 games from the Omarchy bar: load PRG, CRT, D64, or TAP images, map a joystick, and play on workspace 64.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Omarchy64",
+    "description": "Commodore 64 launcher for VICE",
+    "category": "Games",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
