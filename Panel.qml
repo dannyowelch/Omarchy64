@@ -467,12 +467,6 @@ Panel {
             spacing: Style.space(8)
             visible: root.emulatorFound
 
-            PanelSectionHeader {
-              text: "C64"
-              foreground: root.contentForeground
-              fontFamily: root.contentFontFamily
-            }
-
             Row {
               width: parent.width
               spacing: Style.space(8)
@@ -622,53 +616,67 @@ Panel {
               onChanged: function(v) { root.setPref("joystick", v) }
             }
 
-            Column {
+            Row {
               width: parent.width
-              spacing: Style.spacing.labelGap
+              spacing: Style.space(12)
 
-              Text {
-                text: "C64 PORT"
-                color: root.contentDim
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.caption
-                font.bold: true
+              Column {
+                id: portCol
+                width: (parent.width - parent.spacing * 2 - 1) / 2
+                spacing: Style.spacing.labelGap
+
+                Text {
+                  text: "C64 PORT"
+                  color: root.contentDim
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+
+                ButtonGroup {
+                  width: parent.width
+                  options: Model.portOptions()
+                  value: String(root.status.joystickPort)
+                  cursorIndex: root.hasCursorKind("port") ? 0 : -1
+                  foreground: root.contentForeground
+                  fontFamily: root.contentFontFamily
+                  focusable: false
+                  onHovered: function(index, h) { if (h) root.focusKind("port") }
+                  onChanged: function(v) { root.setPref("joystickPort", v) }
+                }
               }
 
-              ButtonGroup {
-                width: parent.width
-                options: Model.portOptions()
-                value: String(root.status.joystickPort)
-                cursorIndex: root.hasCursorKind("port") ? 0 : -1
-                foreground: root.contentForeground
-                fontFamily: root.contentFontFamily
-                focusable: false
-                onHovered: function(index, h) { if (h) root.focusKind("port") }
-                onChanged: function(v) { root.setPref("joystickPort", v) }
-              }
-            }
-
-            Column {
-              width: parent.width
-              spacing: Style.spacing.labelGap
-
-              Text {
-                text: "VIDEO"
-                color: root.contentDim
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.caption
-                font.bold: true
+              Rectangle {
+                width: 1
+                height: Math.max(portCol.implicitHeight, videoCol.implicitHeight)
+                anchors.verticalCenter: parent.verticalCenter
+                color: Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.12)
               }
 
-              ButtonGroup {
-                width: parent.width
-                options: Model.videoOptions()
-                value: String(root.status.video || "pal")
-                cursorIndex: root.hasCursorKind("video") ? 0 : -1
-                foreground: root.contentForeground
-                fontFamily: root.contentFontFamily
-                focusable: false
-                onHovered: function(index, h) { if (h) root.focusKind("video") }
-                onChanged: function(v) { root.setPref("video", v) }
+              Column {
+                id: videoCol
+                width: portCol.width
+                spacing: Style.spacing.labelGap
+
+                Text {
+                  text: "VIDEO"
+                  color: root.contentDim
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+
+                ButtonGroup {
+                  width: parent.width
+                  options: Model.videoOptions()
+                  value: String(root.status.video || "pal")
+                  cursorIndex: root.hasCursorKind("video") ? 0 : -1
+                  foreground: root.contentForeground
+                  fontFamily: root.contentFontFamily
+                  focusable: false
+                  onHovered: function(index, h) { if (h) root.focusKind("video") }
+                  onChanged: function(v) { root.setPref("video", v) }
+                }
               }
             }
 
