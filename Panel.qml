@@ -36,6 +36,7 @@ Panel {
   readonly property string contentFontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property bool emulatorFound: status.emulator && status.emulator.found
   readonly property bool isPlaying: status.running && status.running.active
+  readonly property bool isPaused: root.isPlaying && status.running.paused === true
   readonly property bool dropdownOpen: joystickBox.popupOpen === true
 
   function open() {
@@ -101,6 +102,11 @@ Panel {
   function resetEmu() {
     if (!root.isPlaying) return
     runCtl(["reset"])
+  }
+
+  function togglePause() {
+    if (!root.isPlaying) return
+    runCtl(["pause"])
   }
 
   function loadAndRun() {
@@ -188,6 +194,7 @@ Panel {
     else if (kind === "ejectCart") ejectCart()
     else if (kind === "play") loadAndRun()
     else if (kind === "power") togglePower()
+    else if (kind === "pause") togglePause()
     else if (kind === "reset") resetEmu()
     else if (kind === "joystick") joystickBox.toggle()
     else if (kind === "port") setPref("joystickPort", Model.nextPort(status.joystickPort))
@@ -321,6 +328,10 @@ Panel {
       root.resetEmu()
       return "ok"
     }
+    function pause(): string {
+      root.togglePause()
+      return "ok"
+    }
     function drive8(): string {
       root.attachDrive8()
       return "ok"
@@ -347,7 +358,7 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    tooltipText: root.isPlaying ? ("Omarchy64 · " + (status.running.title || "READY.")) : "Omarchy64"
+    tooltipText: root.isPaused ? "Omarchy64 · paused" : (root.isPlaying ? ("Omarchy64 · " + (status.running.title || "READY.")) : "Omarchy64")
     iconComponent: Component {
       Item {
         Icon64 {
@@ -397,6 +408,7 @@ Panel {
         else if (t === "x" || t === "X") root.ejectCart()
         else if (t === "l" || t === "L") root.loadAndRun()
         else if (t === "b" || t === "B") root.togglePower()
+        else if (t === "p" || t === "P") root.togglePause()
         else if (t === "q" || t === "Q") root.quitEmu()
         else if (t === "r" || t === "R") root.resetEmu()
       }
@@ -543,21 +555,21 @@ Panel {
               elide: Text.ElideMiddle
             }
 
-            Button {
-              width: parent.width
-              text: 'Load "*",8,1'
-              bordered: true
-              hasCursor: root.hasCursorKind("play")
-              foreground: root.contentForeground
-              fontFamily: root.contentFontFamily
-              enabled: !root.busy && !browseProc.running
-              onHovered: function(h) { if (h) root.focusKind("play") }
-              onClicked: root.loadAndRun()
-            }
-
             Row {
               width: parent.width
               spacing: Style.space(8)
+
+              Button {
+                width: (parent.width - parent.spacing) / 2
+                text: 'Load "*",8,1'
+                bordered: true
+                hasCursor: root.hasCursorKind("play")
+                foreground: root.contentForeground
+                fontFamily: root.contentFontFamily
+                enabled: !root.busy && !browseProc.running
+                onHovered: function(h) { if (h) root.focusKind("play") }
+                onClicked: root.loadAndRun()
+              }
 
               Button {
                 width: (parent.width - parent.spacing) / 2
@@ -570,6 +582,24 @@ Panel {
                 enabled: !root.busy
                 onHovered: function(h) { if (h) root.focusKind("power") }
                 onClicked: root.togglePower()
+              }
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Button {
+                width: (parent.width - parent.spacing) / 2
+                text: "Pause"
+                bordered: true
+                active: root.isPaused
+                hasCursor: root.hasCursorKind("pause")
+                foreground: root.contentForeground
+                fontFamily: root.contentFontFamily
+                enabled: !root.busy && root.isPlaying
+                onHovered: function(h) { if (h) root.focusKind("pause") }
+                onClicked: root.togglePause()
               }
 
               Button {
@@ -702,7 +732,7 @@ Panel {
             Text {
               width: parent.width
               wrapMode: Text.WordWrap
-              text: "Drive 8 and Cartridge stay inserted. Load runs a disk. Power starts or stops VICE. Reset is a soft reset. Pads use stick or D-pad plus fire; keyboard is arrows and Space."
+              text: "Drive 8 and Cartridge stay inserted. Load runs a disk. Power starts or stops VICE. Pause and Reset apply while it is running. Pads use stick or D-pad plus fire; keyboard is arrows and Space."
               color: root.contentDim
               font.family: root.contentFontFamily
               font.pixelSize: Style.font.caption

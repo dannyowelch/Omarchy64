@@ -1,7 +1,7 @@
 function emptyStatus() {
   return {
     emulator: { found: false, binary: "", name: "", ui: "", packageHint: "vice-sdl2" },
-    running: { active: false, pid: 0, image: "", title: "", mode: "" },
+    running: { active: false, pid: 0, image: "", title: "", mode: "", paused: false },
     gamesDir: "",
     gamesDirExists: false,
     joystickPort: 2,
@@ -9,7 +9,9 @@ function emptyStatus() {
     warp: true,
     video: "pal",
     drive8: "",
+    drive8Exists: false,
     cart: "",
+    cartExists: false,
     lastMode: "",
     joysticks: [],
     lastError: ""
@@ -34,6 +36,7 @@ function parseStatus(raw) {
       status.running.image = parsed.running.image || ""
       status.running.title = parsed.running.title || ""
       status.running.mode = parsed.running.mode || ""
+      status.running.paused = parsed.running.paused === true
     }
     status.gamesDir = parsed.gamesDir || ""
     status.gamesDirExists = parsed.gamesDirExists === true
@@ -42,7 +45,9 @@ function parseStatus(raw) {
     status.warp = parsed.warp !== false
     status.video = parsed.video === "ntsc" ? "ntsc" : "pal"
     status.drive8 = parsed.drive8 || ""
+    status.drive8Exists = parsed.drive8Exists === true
     status.cart = parsed.cart || ""
+    status.cartExists = parsed.cartExists === true
     status.lastMode = parsed.lastMode || ""
     status.joysticks = Array.isArray(parsed.joysticks) ? parsed.joysticks : []
     status.lastError = parsed.lastError || ""
@@ -116,6 +121,10 @@ function heroMeta(status) {
   if (!status || !status.emulator || !status.emulator.found) return "NO EMULATOR"
   var video = videoLabel(status)
   if (status.running && status.running.active) {
+    if (status.running.paused) {
+      var pausedTitle = status.running.title || prettyName(status.running.image) || prettyName(status.cart)
+      return pausedTitle ? ("PAUSED · " + pausedTitle.toUpperCase()) : "PAUSED"
+    }
     if (status.running.mode === "autostart") {
       var title = status.running.title || prettyName(status.running.image)
       return title ? ("PLAYING · " + title.toUpperCase()) : ("PLAYING · " + video)
@@ -128,12 +137,18 @@ function heroMeta(status) {
 }
 
 function drive8Label(status) {
-  if (status && status.drive8) return prettyName(status.drive8)
+  if (status && status.drive8) {
+    var disk = prettyName(status.drive8)
+    return status.drive8Exists === false ? (disk + " — missing") : disk
+  }
   return "Empty. Choose a disk; does not start VICE."
 }
 
 function cartLabel(status) {
-  if (status && status.cart) return prettyName(status.cart)
+  if (status && status.cart) {
+    var cart = prettyName(status.cart)
+    return status.cartExists === false ? (cart + " — missing") : cart
+  }
   return "Empty. Choose a cartridge; does not start VICE."
 }
 
@@ -147,7 +162,10 @@ function cursorItems(status) {
   if (status.cart) items.push({ kind: "ejectCart" })
   items.push({ kind: "play" })
   items.push({ kind: "power" })
-  if (status.running && status.running.active) items.push({ kind: "reset" })
+  if (status.running && status.running.active) {
+    items.push({ kind: "pause" })
+    items.push({ kind: "reset" })
+  }
   items.push({ kind: "joystick" })
   items.push({ kind: "port" })
   items.push({ kind: "video" })

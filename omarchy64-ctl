@@ -17,12 +17,13 @@ MONITOR_PORT="6510"
 
 usage() {
   cat <<USAGE
-Usage: omarchy64-ctl <status|launch|play-last|basic|power|reset|drive8|eject|cart|eject-cart|quit|browse|set|ensure-rules|install-emu> [arg]
+Usage: omarchy64-ctl <status|launch|play-last|basic|power|pause|reset|drive8|eject|cart|eject-cart|quit|browse|set|ensure-rules|install-emu> [arg]
 
 Launch VICE (x64sc / x64).
   launch [image]   RUN the disk in drive 8, or IMAGE if given
   basic            Power on; attaches drive 8 and the cartridge if set
   power            Toggle: start if VICE is off, quit if it is on
+  pause            Toggle VICE pause (same as Alt+P)
   reset            Soft-reset the running emulator (CPU reset)
   drive8 [image]   Set/attach a disk; does not start VICE
   eject            Empty drive 8
@@ -55,7 +56,8 @@ default_state() {
     lastImage: "",
     lastMode: "",
     drive8: "",
-    cart: ""
+    cart: "",
+    paused: false
   }'
 }
 
@@ -75,7 +77,8 @@ read_state() {
       .lastImage = (.lastImage // "") |
       .lastMode = (.lastMode // "") |
       .drive8 = (.drive8 // "") |
-      .cart = (.cart // "")
+      .cart = (.cart // "") |
+      .paused = (.paused == true)
     ' "$STATE_FILE" 2>/dev/null || default_state
   else
     default_state
@@ -520,11 +523,12 @@ record_session() {
                    else (.drive8 // "") end)
       | .cart = (if $mode == "autostart" and ($image | test("\\.crt$"; "i")) then $image
                  else (.cart // "") end)
+      | .paused = false
     ' <<<"$state"
 }
 
 emit_status() {
-  local state emu pads games_dir pid image title mode drive8 cart
+  local state emu pads games_dir pid image title mode drive8 cart paused=false
   state="$(read_state)"
   emu="$(find_emulator)"
   pads="$(list_joysticks_json)"
@@ -536,10 +540,16 @@ emit_status() {
   mode=""
   drive8="$(jq -r '.drive8 // empty' <<<"$state")"
   cart="$(jq -r '.cart // empty' <<<"$state")"
+  local drive8_exists=false cart_exists=false
+  drive8="${drive8/#\~/$HOME}"
+  cart="${cart/#\~/$HOME}"
+  if [[ -n $drive8 && -f $drive8 ]]; then drive8_exists=true; fi
+  if [[ -n $cart && -f $cart ]]; then cart_exists=true; fi
   if [[ -n ${pid:-} ]]; then
     image="$(jq -r '.lastImage // empty' <<<"$state")"
     mode="$(jq -r '.lastMode // empty' <<<"$state")"
     [[ -n $image ]] && title="$(basename "$image")"
+    paused="$(jq -r '.paused // false' <<<"$state")"
   else
     pid=0
   fi
@@ -553,15 +563,18 @@ emit_status() {
     --argjson warp "$(jq -r '.warp' <<<"$state")" \
     --arg video "$(jq -r '.video' <<<"$state")" \
     --arg drive8 "$drive8" \
+    --argjson drive8Exists "$([[ $drive8_exists == true ]] && echo true || echo false)" \
     --arg cart "$cart" \
+    --argjson cartExists "$([[ $cart_exists == true ]] && echo true || echo false)" \
     --arg lastMode "$(jq -r '.lastMode' <<<"$state")" \
     --argjson pid "${pid:-0}" \
     --arg image "$image" \
     --arg title "$title" \
     --arg mode "$mode" \
+    --argjson paused "$([[ $paused == true ]] && echo true || echo false)" \
     '{
       emulator: $emulator,
-      running: {active: ($pid > 0), pid: $pid, image: $image, title: $title, mode: $mode},
+      running: {active: ($pid > 0), pid: $pid, image: $image, title: $title, mode: $mode, paused: ($pid > 0 and $paused)},
       gamesDir: $gamesDir,
       gamesDirExists: $gamesDirExists,
       joystickPort: $joystickPort,
@@ -569,7 +582,9 @@ emit_status() {
       warp: $warp,
       video: $video,
       drive8: $drive8,
+      drive8Exists: $drive8Exists,
       cart: $cart,
+      cartExists: $cartExists,
       lastMode: $lastMode,
       joysticks: $joysticks,
       lastError: ""
@@ -588,7 +603,7 @@ quit_emu() {
     done
     pid_alive "$pid" && kill -9 "$pid" 2>/dev/null || true
   fi
-  write_state "$(jq -c '.lastPid = 0' <<<"$state")"
+  write_state "$(jq -c '.lastPid = 0 | .paused = false' <<<"$state")"
 }
 
 start_vice() {
@@ -646,6 +661,23 @@ start_vice() {
     apply_controls "$(read_state)" && break
     sleep 0.15
   done
+  # Power-on must attach the remembered cart the same way the panel's
+  # Cartridge button does. -cartcrt on the command line is not enough if
+  # VICE reloads an empty slot from config, and we skip -cartcrt entirely
+  # when the file has gone missing.
+  if [[ $mode == basic ]]; then
+    local cart
+    cart="$(jq -r '.cart // empty' <<<"$state")"
+    cart="${cart/#\~/$HOME}"
+    if [[ -n $cart && -f $cart ]]; then
+      for i in 1 2 3 4 5 6 7 8; do
+        vice_monitor "attach \"$(monitor_quote "$cart")\" 32" && break
+        sleep 0.15
+      done
+    elif [[ -n $cart ]]; then
+      echo "omarchy64-ctl: cartridge not found: $cart" >&2
+    fi
+  fi
   emit_status
 }
 
@@ -712,12 +744,33 @@ cmd_reset() {
   emit_status
 }
 
+vice_toggle_pause() {
+  need hyprctl
+  local out
+  # VICE's pause-toggle hotkey is Alt+P. Target the window by class so
+  # the panel overlay does not eat the key.
+  if ! out="$(hyprctl dispatch 'hl.dsp.send_shortcut({ mods = "ALT", key = "P", window = "class:^(x64sc|x64|VICE)$" })' 2>&1)"; then
+    fail "could not pause VICE: $out"
+  fi
+}
+
+cmd_pause() {
+  local state pid
+  state="$(read_state)"
+  pid="$(running_pid "$state" || true)"
+  [[ -n ${pid:-} ]] || fail "VICE is not running"
+  vice_toggle_pause
+  write_state "$(jq -c '.paused = ((.paused // false) | not)' <<<"$state")"
+  emit_status
+}
+
 cmd_drive8() {
   local image="${1:-}" ext pid
   [[ -n $image ]] || fail "no disk for drive 8"
   image="${image/#\~/$HOME}"
   [[ -f $image ]] || fail "image not found: $image"
   is_disk_image "$image" || fail "Drive 8 needs a disk image (.d64, .g64, .d71, .d81)"
+  image="$(realpath -e "$image")"
 
   local state
   state="$(read_state)"
@@ -747,6 +800,7 @@ cmd_cart() {
   image="${image/#\~/$HOME}"
   [[ -f $image ]] || fail "image not found: $image"
   is_cart_image "$image" || fail "Cartridge needs a .crt image"
+  image="$(realpath -e "$image")"
 
   local state
   state="$(read_state)"
@@ -808,6 +862,10 @@ cmd_browse() {
     parent="$(dirname "$current")"
     if [[ -n $current && -d $parent ]]; then
       start="$parent/"
+    elif [[ ${1:-} == --carts && -d $dir/Carts ]]; then
+      start="$dir/Carts/"
+    elif [[ ${1:-} == --disks && -d $dir/Disks ]]; then
+      start="$dir/Disks/"
     fi
   fi
   set +e
@@ -932,6 +990,7 @@ launch) cmd_launch "${1:-}" ;;
 play-last) cmd_launch "" ;;
 basic) cmd_basic ;;
 power) cmd_power ;;
+pause) cmd_pause ;;
 reset) cmd_reset ;;
 drive8) cmd_drive8 "${1:-}" ;;
 eject) cmd_eject ;;
