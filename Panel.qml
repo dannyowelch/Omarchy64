@@ -89,6 +89,20 @@ Panel {
     runCtl(["basic"], true)
   }
 
+  function togglePower() {
+    if (!root.emulatorFound) {
+      runCtl(["install-emu"])
+      return
+    }
+    if (root.isPlaying) runCtl(["power"])
+    else runCtl(["power"], true)
+  }
+
+  function resetEmu() {
+    if (!root.isPlaying) return
+    runCtl(["reset"])
+  }
+
   function loadAndRun() {
     if (!root.emulatorFound) {
       runCtl(["install-emu"])
@@ -114,6 +128,19 @@ Panel {
     browseFor("drive8")
   }
 
+  function ejectCart() {
+    if (!root.status.cart) return
+    runCtl(["eject-cart"])
+  }
+
+  function attachCart() {
+    if (!root.emulatorFound) {
+      runCtl(["install-emu"])
+      return
+    }
+    browseFor("cart")
+  }
+
   function quitEmu() {
     runCtl(["quit"])
   }
@@ -123,7 +150,9 @@ Panel {
     root.lastError = ""
     root.browseThen = mode
     root.pendingReopen = false
-    browseProc.command = [root.ctl, "browse", "--disks"]
+    if (mode === "drive8") browseProc.command = [root.ctl, "browse", "--disks"]
+    else if (mode === "cart") browseProc.command = [root.ctl, "browse", "--carts"]
+    else browseProc.command = [root.ctl, "browse"]
     // The panel is a layer-shell overlay, so zenity cannot stack above it.
     if (root.opened) root.close()
     browseStartTimer.restart()
@@ -155,12 +184,14 @@ Panel {
     var kind = itemKind(selectedIndex)
     if (kind === "drive8") attachDrive8()
     else if (kind === "eject") ejectDrive8()
+    else if (kind === "cart") attachCart()
+    else if (kind === "ejectCart") ejectCart()
     else if (kind === "play") loadAndRun()
-    else if (kind === "basic") launchBasic()
+    else if (kind === "power") togglePower()
+    else if (kind === "reset") resetEmu()
     else if (kind === "joystick") joystickBox.toggle()
     else if (kind === "port") setPref("joystickPort", Model.nextPort(status.joystickPort))
     else if (kind === "video") setPref("video", Model.nextVideo(status.video))
-    else if (kind === "quit") quitEmu()
   }
 
   function focusKind(kind) {
@@ -251,6 +282,9 @@ Panel {
         if (root.browseThen === "drive8") {
           root.pendingReopen = !root.isPlaying
           root.runCtl(["drive8", path])
+        } else if (root.browseThen === "cart") {
+          root.pendingReopen = !root.isPlaying
+          root.runCtl(["cart", path])
         } else {
           root.launchPath(path)
         }
@@ -279,12 +313,28 @@ Panel {
       root.launchBasic()
       return "ok"
     }
+    function power(): string {
+      root.togglePower()
+      return "ok"
+    }
+    function reset(): string {
+      root.resetEmu()
+      return "ok"
+    }
     function drive8(): string {
       root.attachDrive8()
       return "ok"
     }
     function eject(): string {
       root.ejectDrive8()
+      return "ok"
+    }
+    function cart(): string {
+      root.attachCart()
+      return "ok"
+    }
+    function ejectCart(): string {
+      root.ejectCart()
       return "ok"
     }
     function quit(): string {
@@ -343,10 +393,12 @@ Panel {
       onTextKey: function(t) {
         if (t === "d" || t === "D") root.attachDrive8()
         else if (t === "e" || t === "E") root.ejectDrive8()
+        else if (t === "c" || t === "C") root.attachCart()
+        else if (t === "x" || t === "X") root.ejectCart()
         else if (t === "l" || t === "L") root.loadAndRun()
-        else if (t === "b" || t === "B") root.launchBasic()
+        else if (t === "b" || t === "B") root.togglePower()
         else if (t === "q" || t === "Q") root.quitEmu()
-        else if (t === "r" || t === "R") root.refresh()
+        else if (t === "r" || t === "R") root.resetEmu()
       }
 
       Flickable {
@@ -459,6 +511,44 @@ Panel {
               elide: Text.ElideMiddle
             }
 
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Button {
+                width: parent.width - ejectCartBtn.implicitWidth - parent.spacing
+                text: "Cartridge"
+                bordered: true
+                hasCursor: root.hasCursorKind("cart")
+                foreground: root.contentForeground
+                fontFamily: root.contentFontFamily
+                enabled: !root.busy && !browseProc.running
+                onHovered: function(h) { if (h) root.focusKind("cart") }
+                onClicked: root.attachCart()
+              }
+
+              Button {
+                id: ejectCartBtn
+                text: "Eject"
+                bordered: true
+                hasCursor: root.hasCursorKind("ejectCart")
+                foreground: root.contentForeground
+                fontFamily: root.contentFontFamily
+                enabled: !root.busy && root.status.cart !== ""
+                onHovered: function(h) { if (h) root.focusKind("ejectCart") }
+                onClicked: root.ejectCart()
+              }
+            }
+
+            Text {
+              width: parent.width
+              text: Model.cartLabel(root.status)
+              color: root.contentDim
+              font.family: root.contentFontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideMiddle
+            }
+
             Button {
               width: parent.width
               text: 'Load "*",8,1'
@@ -471,29 +561,34 @@ Panel {
               onClicked: root.loadAndRun()
             }
 
-            Button {
+            Row {
               width: parent.width
-              text: "BASIC"
-              bordered: true
-              hasCursor: root.hasCursorKind("basic")
-              foreground: root.contentForeground
-              fontFamily: root.contentFontFamily
-              enabled: !root.busy
-              onHovered: function(h) { if (h) root.focusKind("basic") }
-              onClicked: root.launchBasic()
-            }
+              spacing: Style.space(8)
 
-            Button {
-              width: parent.width
-              visible: root.isPlaying
-              text: "Quit VICE"
-              bordered: true
-              hasCursor: root.hasCursorKind("quit")
-              foreground: root.contentForeground
-              fontFamily: root.contentFontFamily
-              enabled: !root.busy
-              onHovered: function(h) { if (h) root.focusKind("quit") }
-              onClicked: root.quitEmu()
+              Button {
+                width: (parent.width - parent.spacing) / 2
+                text: "Power"
+                bordered: true
+                active: root.isPlaying
+                hasCursor: root.hasCursorKind("power")
+                foreground: root.contentForeground
+                fontFamily: root.contentFontFamily
+                enabled: !root.busy
+                onHovered: function(h) { if (h) root.focusKind("power") }
+                onClicked: root.togglePower()
+              }
+
+              Button {
+                width: (parent.width - parent.spacing) / 2
+                text: "Reset"
+                bordered: true
+                hasCursor: root.hasCursorKind("reset")
+                foreground: root.contentForeground
+                fontFamily: root.contentFontFamily
+                enabled: !root.busy && root.isPlaying
+                onHovered: function(h) { if (h) root.focusKind("reset") }
+                onClicked: root.resetEmu()
+              }
             }
           }
 
@@ -599,7 +694,7 @@ Panel {
             Text {
               width: parent.width
               wrapMode: Text.WordWrap
-              text: "Drive 8 sets the disk. Load runs it. BASIC starts at READY. Pads use stick or D-pad plus fire; keyboard is arrows and Space."
+              text: "Drive 8 and Cartridge stay inserted. Load runs a disk. Power starts or stops VICE. Reset is a soft reset. Pads use stick or D-pad plus fire; keyboard is arrows and Space."
               color: root.contentDim
               font.family: root.contentFontFamily
               font.pixelSize: Style.font.caption

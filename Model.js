@@ -9,6 +9,7 @@ function emptyStatus() {
     warp: true,
     video: "pal",
     drive8: "",
+    cart: "",
     lastMode: "",
     joysticks: [],
     lastError: ""
@@ -41,6 +42,7 @@ function parseStatus(raw) {
     status.warp = parsed.warp !== false
     status.video = parsed.video === "ntsc" ? "ntsc" : "pal"
     status.drive8 = parsed.drive8 || ""
+    status.cart = parsed.cart || ""
     status.lastMode = parsed.lastMode || ""
     status.joysticks = Array.isArray(parsed.joysticks) ? parsed.joysticks : []
     status.lastError = parsed.lastError || ""
@@ -118,6 +120,7 @@ function heroMeta(status) {
       var title = status.running.title || prettyName(status.running.image)
       return title ? ("PLAYING · " + title.toUpperCase()) : ("PLAYING · " + video)
     }
+    if (status.cart) return "CART · " + prettyName(status.cart).toUpperCase()
     if (status.drive8) return "READY. · DRIVE 8"
     return "READY. · " + video
   }
@@ -129,18 +132,25 @@ function drive8Label(status) {
   return "Empty. Choose a disk; does not start VICE."
 }
 
+function cartLabel(status) {
+  if (status && status.cart) return prettyName(status.cart)
+  return "Empty. Choose a cartridge; does not start VICE."
+}
+
 function cursorItems(status) {
   var items = []
   var found = status && status.emulator && status.emulator.found
   if (!found) return items
   items.push({ kind: "drive8" })
   if (status.drive8) items.push({ kind: "eject" })
+  items.push({ kind: "cart" })
+  if (status.cart) items.push({ kind: "ejectCart" })
   items.push({ kind: "play" })
-  items.push({ kind: "basic" })
+  items.push({ kind: "power" })
+  if (status.running && status.running.active) items.push({ kind: "reset" })
   items.push({ kind: "joystick" })
   items.push({ kind: "port" })
   items.push({ kind: "video" })
-  if (status.running && status.running.active) items.push({ kind: "quit" })
   return items
 }
 

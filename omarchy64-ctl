@@ -17,14 +17,18 @@ MONITOR_PORT="6510"
 
 usage() {
   cat <<USAGE
-Usage: omarchy64-ctl <status|launch|play-last|basic|drive8|eject|quit|browse|set|ensure-rules|install-emu> [arg]
+Usage: omarchy64-ctl <status|launch|play-last|basic|power|reset|drive8|eject|cart|eject-cart|quit|browse|set|ensure-rules|install-emu> [arg]
 
 Launch VICE (x64sc / x64).
   launch [image]   RUN the disk in drive 8, or IMAGE if given
-  basic            READY. prompt; attaches drive 8 if a disk is set
+  basic            Power on; attaches drive 8 and the cartridge if set
+  power            Toggle: start if VICE is off, quit if it is on
+  reset            Soft-reset the running emulator (CPU reset)
   drive8 [image]   Set/attach a disk; does not start VICE
   eject            Empty drive 8
-  browse [--disks] File chooser starting in ~/Games/C64
+  cart [image]     Set/attach a .crt; does not start VICE
+  eject-cart       Empty the cartridge slot
+  browse [--disks|--carts] File chooser starting in ~/Games/C64
 USAGE
 }
 
@@ -50,7 +54,8 @@ default_state() {
     lastPid: 0,
     lastImage: "",
     lastMode: "",
-    drive8: ""
+    drive8: "",
+    cart: ""
   }'
 }
 
@@ -69,7 +74,8 @@ read_state() {
       .lastPid = (.lastPid // 0) |
       .lastImage = (.lastImage // "") |
       .lastMode = (.lastMode // "") |
-      .drive8 = (.drive8 // "")
+      .drive8 = (.drive8 // "") |
+      .cart = (.cart // "")
     ' "$STATE_FILE" 2>/dev/null || default_state
   else
     default_state
@@ -419,9 +425,11 @@ vice_args() {
   args+=("-remotemonitor")
   args+=("-remotemonitoraddress" "ip4://${MONITOR_HOST}:${MONITOR_PORT}")
 
-  local drive8
+  local drive8 cart
   drive8="$(jq -r '.drive8 // empty' <<<"$state")"
   drive8="${drive8/#\~/$HOME}"
+  cart="$(jq -r '.cart // empty' <<<"$state")"
+  cart="${cart/#\~/$HOME}"
 
   case "$mode" in
   autostart)
@@ -432,7 +440,12 @@ vice_args() {
     local ext="${image##*.}"
     ext="${ext,,}"
     case "$ext" in
-    crt) args+=("-cartcrt" "$image") ;;
+    crt)
+      args+=("-cartcrt" "$image")
+      if [[ -n $drive8 && -f $drive8 ]]; then
+        args+=("-8" "$drive8")
+      fi
+      ;;
     *) args+=("-autostart" "$image") ;;
     esac
     ;;
@@ -441,6 +454,9 @@ vice_args() {
     args+=("-8" "$image")
     ;;
   basic)
+    if [[ -n $cart && -f $cart ]]; then
+      args+=("-cartcrt" "$cart")
+    fi
     if [[ -n $drive8 && -f $drive8 ]]; then
       args+=("-8" "$drive8")
     fi
@@ -502,11 +518,13 @@ record_session() {
       | .drive8 = (if $mode == "drive8" then $image
                    elif $mode == "autostart" and ($image | test("\\.(d64|g64|d71|d81|d80|d82|x64)$"; "i")) then $image
                    else (.drive8 // "") end)
+      | .cart = (if $mode == "autostart" and ($image | test("\\.crt$"; "i")) then $image
+                 else (.cart // "") end)
     ' <<<"$state"
 }
 
 emit_status() {
-  local state emu pads games_dir pid image title mode drive8
+  local state emu pads games_dir pid image title mode drive8 cart
   state="$(read_state)"
   emu="$(find_emulator)"
   pads="$(list_joysticks_json)"
@@ -517,6 +535,7 @@ emit_status() {
   title=""
   mode=""
   drive8="$(jq -r '.drive8 // empty' <<<"$state")"
+  cart="$(jq -r '.cart // empty' <<<"$state")"
   if [[ -n ${pid:-} ]]; then
     image="$(jq -r '.lastImage // empty' <<<"$state")"
     mode="$(jq -r '.lastMode // empty' <<<"$state")"
@@ -534,6 +553,7 @@ emit_status() {
     --argjson warp "$(jq -r '.warp' <<<"$state")" \
     --arg video "$(jq -r '.video' <<<"$state")" \
     --arg drive8 "$drive8" \
+    --arg cart "$cart" \
     --arg lastMode "$(jq -r '.lastMode' <<<"$state")" \
     --argjson pid "${pid:-0}" \
     --arg image "$image" \
@@ -549,6 +569,7 @@ emit_status() {
       warp: $warp,
       video: $video,
       drive8: $drive8,
+      cart: $cart,
       lastMode: $lastMode,
       joysticks: $joysticks,
       lastError: ""
@@ -634,6 +655,19 @@ is_disk_image() {
   [[ $ext =~ ^(d64|g64|d71|d81|d80|d82|x64)$ ]]
 }
 
+is_cart_image() {
+  local ext="${1##*.}"
+  ext="${ext,,}"
+  [[ $ext == crt ]]
+}
+
+monitor_quote() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "$s"
+}
+
 cmd_launch() {
   local image="${1:-}"
   local state ext
@@ -656,6 +690,28 @@ cmd_basic() {
   start_vice basic ""
 }
 
+cmd_power() {
+  local state pid
+  state="$(read_state)"
+  pid="$(running_pid "$state" || true)"
+  if [[ -n ${pid:-} ]]; then
+    quit_emu
+    emit_status
+    return
+  fi
+  cmd_basic
+}
+
+cmd_reset() {
+  local state pid
+  state="$(read_state)"
+  pid="$(running_pid "$state" || true)"
+  [[ -n ${pid:-} ]] || fail "VICE is not running"
+  # Monitor: 0 = reset (soft / RESET line), 1 = power cycle.
+  vice_monitor "reset 0" || fail "VICE did not take the reset"
+  emit_status
+}
+
 cmd_drive8() {
   local image="${1:-}" ext pid
   [[ -n $image ]] || fail "no disk for drive 8"
@@ -669,9 +725,7 @@ cmd_drive8() {
   state="$(read_state)"
   pid="$(running_pid "$state" || true)"
   if [[ -n ${pid:-} ]]; then
-    local quoted="${image//\\/\\\\}"
-    quoted="${quoted//\"/\\\"}"
-    vice_monitor "attach \"$quoted\" 8" || fail "VICE is running but the disk could not be attached. Try F12 → Drive."
+    vice_monitor "attach \"$(monitor_quote "$image")\" 8" || fail "VICE is running but the disk could not be attached. Try F12 → Drive."
   fi
   emit_status
 }
@@ -687,35 +741,74 @@ cmd_eject() {
   emit_status
 }
 
+cmd_cart() {
+  local image="${1:-}" pid
+  [[ -n $image ]] || fail "no cartridge"
+  image="${image/#\~/$HOME}"
+  [[ -f $image ]] || fail "image not found: $image"
+  is_cart_image "$image" || fail "Cartridge needs a .crt image"
+
+  local state
+  state="$(read_state)"
+  write_state "$(jq -c --arg image "$image" '.cart = $image' <<<"$state")"
+  state="$(read_state)"
+  pid="$(running_pid "$state" || true)"
+  if [[ -n ${pid:-} ]]; then
+    # Device 32 is VICE's monitor unit for the cartridge slot. Attach
+    # resets into the cart when CartridgeReset is on (the default).
+    vice_monitor "attach \"$(monitor_quote "$image")\" 32" || fail "VICE is running but the cartridge could not be attached. Power on from the panel."
+  fi
+  emit_status
+}
+
+cmd_eject_cart() {
+  local state pid
+  state="$(read_state)"
+  pid="$(running_pid "$state" || true)"
+  if [[ -n ${pid:-} ]]; then
+    vice_monitor "detach 32" || true
+  fi
+  write_state "$(jq -c '.cart = ""' <<<"$state")"
+  emit_status
+}
+
 cmd_browse() {
   need zenity
-  local state dir picked disks=0 title filter start disk
+  local state dir picked title filter start current parent
   state="$(read_state)"
   dir="$(games_dir_from "$state")"
   mkdir -p "$dir"
   start="$dir/"
-  disk="$(jq -r '.drive8 // empty' <<<"$state")"
-  disk="${disk/#\~/$HOME}"
-  if [[ -n $disk && -f $disk ]]; then
-    # Open in the current disk's folder with that file selected, so
-    # multi-disk games in a subdirectory are one click away.
-    start="$disk"
-  else
-    local parent
-    parent="$(dirname "$disk")"
-    if [[ -n $disk && -d $parent ]]; then
-      start="$parent/"
-    fi
-  fi
-  if [[ ${1:-} == --disks ]]; then
-    disks=1
-  fi
-  if (( disks )); then
+  case "${1:-}" in
+  --disks)
     title="Drive 8"
     filter="Disk images | *.d64 *.D64 *.g64 *.G64 *.d71 *.D71 *.d81 *.D81 *.d80 *.D80 *.d82 *.D82"
-  else
+    current="$(jq -r '.drive8 // empty' <<<"$state")"
+    ;;
+  --carts)
+    title="Cartridge"
+    filter="Cartridge images | *.crt *.CRT"
+    current="$(jq -r '.cart // empty' <<<"$state")"
+    ;;
+  *)
     title='Load "*",8,1'
     filter="C64 images | *.prg *.PRG *.crt *.CRT *.d64 *.D64 *.g64 *.G64 *.tap *.TAP *.t64 *.T64"
+    current="$(jq -r '.drive8 // empty' <<<"$state")"
+    if [[ -z $current ]]; then
+      current="$(jq -r '.cart // empty' <<<"$state")"
+    fi
+    ;;
+  esac
+  current="${current/#\~/$HOME}"
+  if [[ -n $current && -f $current ]]; then
+    # Open in the current image's folder with that file selected, so
+    # multi-disk games in a subdirectory are one click away.
+    start="$current"
+  else
+    parent="$(dirname "$current")"
+    if [[ -n $current && -d $parent ]]; then
+      start="$parent/"
+    fi
   fi
   set +e
   picked="$(zenity --file-selection \
@@ -764,7 +857,7 @@ cmd_set() {
     write_state "$state"
     pid="$(running_pid "$state" || true)"
     if [[ -n ${pid:-} ]]; then
-      apply_controls "$(read_state)" || fail "VICE did not take the port change. Restart it from BASIC or Load, then try again."
+      apply_controls "$(read_state)" || fail "VICE did not take the port change. Restart it from Power or Load, then try again."
     fi
     emit_status
     return 0
@@ -775,7 +868,7 @@ cmd_set() {
     write_state "$state"
     pid="$(running_pid "$state" || true)"
     if [[ -n ${pid:-} ]]; then
-      apply_controls "$(read_state)" || fail "VICE did not take the joystick change. Restart it from BASIC or Load, then try again."
+      apply_controls "$(read_state)" || fail "VICE did not take the joystick change. Restart it from Power or Load, then try again."
     fi
     emit_status
     return 0
@@ -838,8 +931,12 @@ status) emit_status ;;
 launch) cmd_launch "${1:-}" ;;
 play-last) cmd_launch "" ;;
 basic) cmd_basic ;;
+power) cmd_power ;;
+reset) cmd_reset ;;
 drive8) cmd_drive8 "${1:-}" ;;
 eject) cmd_eject ;;
+cart) cmd_cart "${1:-}" ;;
+eject-cart) cmd_eject_cart ;;
 quit) quit_emu; emit_status ;;
 browse) cmd_browse "${1:-}" ;;
 browse-dir) cmd_browse_dir ;;
