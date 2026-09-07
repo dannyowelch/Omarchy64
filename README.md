@@ -2,7 +2,7 @@
 
 Launch [VICE](https://vice-emu.sourceforge.io/) from the Omarchy bar, load a C64 image, map a joystick, and play on a dedicated workspace.
 
-The bar icon is the classic Commodore “duck lips” C.
+The bar icon is a grayscale pixel-art **64**, colored with the bar foreground so it matches the other plugin glyphs.
 
 ## Why VICE
 
@@ -12,7 +12,7 @@ Frodo and similar emulators are lighter, but they do not cover cartridges, tapes
 
 ## What it does
 
-- Bar button with the duck-lips C; click opens the panel
+- Bar button with a grayscale **64**; click opens the panel
 - **Drive 8** — choose a disk; attaches it if VICE is already open, otherwise just remembers it
 - **Eject** — empty drive 8
 - **Load "*",8,1** — RUN the disk in drive 8 (file chooser if the drive is empty)
@@ -52,7 +52,7 @@ omarchy plugin enable io.github.dannyowelch.omarchy64 --section right
 
 ## Usage
 
-- Click the duck-lips C on the bar
+- Click **64** on the bar
 - **BASIC** for a blank READY. prompt
 - **Drive 8** to put a `.d64` in the drive (type `LOAD "*",8,1` yourself)
 - **Load "*",8,1** to launch and RUN a `.prg`, `.crt`, `.d64`, or `.tap`
@@ -101,4 +101,4 @@ Removal does not uninstall `vice-sdl2` or delete `~/Games/C64`. Delete `~/.local
 
 ## License
 
-MIT. The duck-lips C is a tribute to the classic Commodore mark.
+MIT.

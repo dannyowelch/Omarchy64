@@ -300,10 +300,10 @@ Panel {
     tooltipText: root.isPlaying ? ("Omarchy64 · " + (status.running.title || "READY.")) : "Omarchy64"
     iconComponent: Component {
       Item {
-        CommodoreLogo {
+        Icon64 {
           anchors.centerIn: parent
-          iconSize: Style.space(13)
-          rainbow: true
+          iconSize: parent.width
+          color: root.barForeground
           opacity: root.emulatorFound ? 1.0 : 0.55
         }
       }
@@ -374,9 +374,9 @@ Panel {
             fontFamily: root.contentFontFamily
             iconOpacity: root.emulatorFound ? 1.0 : 0.55
             iconComponent: Component {
-              CommodoreLogo {
+              Icon64 {
                 iconSize: Style.font.display
-                rainbow: true
+                color: root.contentForeground
               }
             }
           }
