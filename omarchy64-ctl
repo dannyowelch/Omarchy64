@@ -661,21 +661,20 @@ start_vice() {
     apply_controls "$(read_state)" && break
     sleep 0.15
   done
-  # Power-on must attach the remembered cart the same way the panel's
-  # Cartridge button does. -cartcrt on the command line is not enough if
-  # VICE reloads an empty slot from config, and we skip -cartcrt entirely
-  # when the file has gone missing.
+  # Reset reloads VICE's CartridgeFile default, not whatever happens to
+  # be in the slot. Point that resource at the remembered cart (or a
+  # guaranteed-missing path) so Reset matches the panel.
   if [[ $mode == basic ]]; then
     local cart
     cart="$(jq -r '.cart // empty' <<<"$state")"
     cart="${cart/#\~/$HOME}"
     if [[ -n $cart && -f $cart ]]; then
-      for i in 1 2 3 4 5 6 7 8; do
-        vice_monitor "attach \"$(monitor_quote "$cart")\" 32" && break
-        sleep 0.15
-      done
+      vice_cart_set "$cart" || true
     elif [[ -n $cart ]]; then
       echo "omarchy64-ctl: cartridge not found: $cart" >&2
+      vice_cart_clear || true
+    else
+      vice_cart_clear || true
     fi
   fi
   emit_status
@@ -794,6 +793,32 @@ cmd_eject() {
   emit_status
 }
 
+# VICE Reset reloads CartridgeFile, not the live slot. attach/detach 32
+# only change the current session, which is why a cart inserted after
+# power-on did not survive Reset, and why eject+Reset still booted a
+# cart that was passed as -cartcrt. An empty CartridgeFile is a no-op
+# when the resource is already empty, and CartridgeType -1 re-attaches
+# if CartridgeFile still points at a real CRT. A missing path is what
+# actually sets type NONE and clears the filename.
+EMPTY_CART="$STATE_DIR/omarchy64-no-cart.crt"
+
+vice_cart_set() {
+  local image="$1"
+  [[ -n $image && -f $image ]] || return 1
+  vice_monitor "resourceset CartridgeFile $(monitor_quote "$image")"
+}
+
+vice_cart_clear() {
+  local -a cmds=(
+    "resourceset CartridgeFile $(monitor_quote "$EMPTY_CART")"
+    "detach 32"
+  )
+  if [[ ${1:-} == reset ]]; then
+    cmds+=("reset 1")
+  fi
+  vice_monitor "${cmds[@]}"
+}
+
 cmd_cart() {
   local image="${1:-}" pid
   [[ -n $image ]] || fail "no cartridge"
@@ -808,9 +833,10 @@ cmd_cart() {
   state="$(read_state)"
   pid="$(running_pid "$state" || true)"
   if [[ -n ${pid:-} ]]; then
-    # Device 32 is VICE's monitor unit for the cartridge slot. Attach
-    # resets into the cart when CartridgeReset is on (the default).
-    vice_monitor "attach \"$(monitor_quote "$image")\" 32" || fail "VICE is running but the cartridge could not be attached. Power on from the panel."
+    if ! vice_cart_set "$image"; then
+      start_vice basic ""
+      return
+    fi
   fi
   emit_status
 }
@@ -818,11 +844,14 @@ cmd_cart() {
 cmd_eject_cart() {
   local state pid
   state="$(read_state)"
+  write_state "$(jq -c '.cart = ""' <<<"$state")"
   pid="$(running_pid "$state" || true)"
   if [[ -n ${pid:-} ]]; then
-    vice_monitor "detach 32" || true
+    if ! vice_cart_clear reset; then
+      start_vice basic ""
+      return
+    fi
   fi
-  write_state "$(jq -c '.cart = ""' <<<"$state")"
   emit_status
 }
 
