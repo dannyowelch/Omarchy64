@@ -122,8 +122,11 @@ function heroMeta(status) {
   var video = videoLabel(status)
   if (status.running && status.running.active) {
     if (status.running.paused) {
-      var pausedTitle = status.running.title || prettyName(status.running.image) || prettyName(status.cart)
-      return pausedTitle ? ("PAUSED · " + pausedTitle.toUpperCase()) : "PAUSED"
+      var pausedTitle = status.running.title || ""
+      if (!pausedTitle && status.running.image) pausedTitle = prettyName(status.running.image)
+      if (!pausedTitle && status.cart) pausedTitle = prettyName(status.cart)
+      if (!pausedTitle || pausedTitle === "Unknown") return "PAUSED"
+      return "PAUSED · " + pausedTitle.toUpperCase()
     }
     if (status.running.mode === "autostart") {
       var title = status.running.title || prettyName(status.running.image)
