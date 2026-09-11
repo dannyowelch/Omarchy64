@@ -121,6 +121,18 @@ Panel {
     browseFor("launch")
   }
 
+  function loadTape() {
+    if (!root.emulatorFound) {
+      runCtl(["install-emu"])
+      return
+    }
+    if (root.status.tape) {
+      runCtl(["launch-tape"], true)
+      return
+    }
+    browseFor("launchTape")
+  }
+
   function ejectDrive8() {
     if (!root.status.drive8) return
     runCtl(["eject"])
@@ -132,6 +144,19 @@ Panel {
       return
     }
     browseFor("drive8")
+  }
+
+  function ejectTape() {
+    if (!root.status.tape) return
+    runCtl(["eject-tape"])
+  }
+
+  function attachTape() {
+    if (!root.emulatorFound) {
+      runCtl(["install-emu"])
+      return
+    }
+    browseFor("tape")
   }
 
   function ejectCart() {
@@ -157,6 +182,7 @@ Panel {
     root.browseThen = mode
     root.pendingReopen = false
     if (mode === "drive8") browseProc.command = [root.ctl, "browse", "--disks"]
+    else if (mode === "tape" || mode === "launchTape") browseProc.command = [root.ctl, "browse", "--tapes"]
     else if (mode === "cart") browseProc.command = [root.ctl, "browse", "--carts"]
     else browseProc.command = [root.ctl, "browse"]
     // The panel is a layer-shell overlay, so zenity cannot stack above it.
@@ -190,9 +216,12 @@ Panel {
     var kind = itemKind(selectedIndex)
     if (kind === "drive8") attachDrive8()
     else if (kind === "eject") ejectDrive8()
+    else if (kind === "tape") attachTape()
+    else if (kind === "ejectTape") ejectTape()
     else if (kind === "cart") attachCart()
     else if (kind === "ejectCart") ejectCart()
     else if (kind === "play") loadAndRun()
+    else if (kind === "playTape") loadTape()
     else if (kind === "power") togglePower()
     else if (kind === "pause") togglePause()
     else if (kind === "reset") resetEmu()
@@ -289,6 +318,11 @@ Panel {
         if (root.browseThen === "drive8") {
           root.pendingReopen = !root.isPlaying
           root.runCtl(["drive8", path])
+        } else if (root.browseThen === "tape") {
+          root.pendingReopen = !root.isPlaying
+          root.runCtl(["tape", path])
+        } else if (root.browseThen === "launchTape") {
+          root.runCtl(["launch-tape", path], true)
         } else if (root.browseThen === "cart") {
           root.pendingReopen = !root.isPlaying
           root.runCtl(["cart", path])
@@ -316,6 +350,10 @@ Panel {
       root.launchPath("")
       return "ok"
     }
+    function launchTape(): string {
+      root.loadTape()
+      return "ok"
+    }
     function basic(): string {
       root.launchBasic()
       return "ok"
@@ -338,6 +376,14 @@ Panel {
     }
     function eject(): string {
       root.ejectDrive8()
+      return "ok"
+    }
+    function tape(): string {
+      root.attachTape()
+      return "ok"
+    }
+    function ejectTape(): string {
+      root.ejectTape()
       return "ok"
     }
     function cart(): string {
@@ -404,9 +450,12 @@ Panel {
       onTextKey: function(t) {
         if (t === "d" || t === "D") root.attachDrive8()
         else if (t === "e" || t === "E") root.ejectDrive8()
+        else if (t === "t" || t === "T") root.attachTape()
+        else if (t === "y" || t === "Y") root.ejectTape()
         else if (t === "c" || t === "C") root.attachCart()
         else if (t === "x" || t === "X") root.ejectCart()
         else if (t === "l" || t === "L") root.loadAndRun()
+        else if (t === "a" || t === "A") root.loadTape()
         else if (t === "b" || t === "B") root.togglePower()
         else if (t === "p" || t === "P") root.togglePause()
         else if (t === "q" || t === "Q") root.quitEmu()
@@ -522,6 +571,44 @@ Panel {
               spacing: Style.space(8)
 
               Button {
+                width: parent.width - ejectTapeBtn.implicitWidth - parent.spacing
+                text: "Tape"
+                bordered: true
+                hasCursor: root.hasCursorKind("tape")
+                foreground: root.contentForeground
+                fontFamily: root.contentFontFamily
+                enabled: !root.busy && !browseProc.running
+                onHovered: function(h) { if (h) root.focusKind("tape") }
+                onClicked: root.attachTape()
+              }
+
+              Button {
+                id: ejectTapeBtn
+                text: "Eject"
+                bordered: true
+                hasCursor: root.hasCursorKind("ejectTape")
+                foreground: root.contentForeground
+                fontFamily: root.contentFontFamily
+                enabled: !root.busy && root.status.tape !== ""
+                onHovered: function(h) { if (h) root.focusKind("ejectTape") }
+                onClicked: root.ejectTape()
+              }
+            }
+
+            Text {
+              width: parent.width
+              text: Model.tapeLabel(root.status)
+              color: root.contentDim
+              font.family: root.contentFontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideMiddle
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Button {
                 width: parent.width - ejectCartBtn.implicitWidth - parent.spacing
                 text: "Cartridge"
                 bordered: true
@@ -573,6 +660,23 @@ Panel {
 
               Button {
                 width: (parent.width - parent.spacing) / 2
+                text: "LOAD TAPE"
+                bordered: true
+                hasCursor: root.hasCursorKind("playTape")
+                foreground: root.contentForeground
+                fontFamily: root.contentFontFamily
+                enabled: !root.busy && !browseProc.running
+                onHovered: function(h) { if (h) root.focusKind("playTape") }
+                onClicked: root.loadTape()
+              }
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Button {
+                width: (parent.width - parent.spacing * 2) / 3
                 text: "Power"
                 bordered: true
                 active: root.isPlaying
@@ -583,14 +687,9 @@ Panel {
                 onHovered: function(h) { if (h) root.focusKind("power") }
                 onClicked: root.togglePower()
               }
-            }
-
-            Row {
-              width: parent.width
-              spacing: Style.space(8)
 
               Button {
-                width: (parent.width - parent.spacing) / 2
+                width: (parent.width - parent.spacing * 2) / 3
                 text: "Pause"
                 bordered: true
                 active: root.isPaused
@@ -603,7 +702,7 @@ Panel {
               }
 
               Button {
-                width: (parent.width - parent.spacing) / 2
+                width: (parent.width - parent.spacing * 2) / 3
                 text: "Reset"
                 bordered: true
                 hasCursor: root.hasCursorKind("reset")
@@ -732,7 +831,7 @@ Panel {
             Text {
               width: parent.width
               wrapMode: Text.WordWrap
-              text: "Drive 8 and Cartridge stay inserted. Load runs a disk. Power starts or stops VICE. Pause and Reset apply while it is running. Pads use stick or D-pad plus fire; keyboard is arrows and Space."
+              text: "Drive 8, Tape, and Cartridge stay inserted. Load runs a disk. LOAD TAPE autostarts the cassette. Power starts or stops VICE. Pause and Reset apply while it is running. Pads use stick or D-pad plus fire; keyboard is arrows and Space."
               color: root.contentDim
               font.family: root.contentFontFamily
               font.pixelSize: Style.font.caption

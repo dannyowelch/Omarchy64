@@ -10,6 +10,8 @@ function emptyStatus() {
     video: "pal",
     drive8: "",
     drive8Exists: false,
+    tape: "",
+    tapeExists: false,
     cart: "",
     cartExists: false,
     lastMode: "",
@@ -46,6 +48,8 @@ function parseStatus(raw) {
     status.video = parsed.video === "ntsc" ? "ntsc" : "pal"
     status.drive8 = parsed.drive8 || ""
     status.drive8Exists = parsed.drive8Exists === true
+    status.tape = parsed.tape || ""
+    status.tapeExists = parsed.tapeExists === true
     status.cart = parsed.cart || ""
     status.cartExists = parsed.cartExists === true
     status.lastMode = parsed.lastMode || ""
@@ -125,6 +129,7 @@ function heroMeta(status) {
       var pausedTitle = status.running.title || ""
       if (!pausedTitle && status.running.image) pausedTitle = prettyName(status.running.image)
       if (!pausedTitle && status.cart) pausedTitle = prettyName(status.cart)
+      if (!pausedTitle && status.tape) pausedTitle = prettyName(status.tape)
       if (!pausedTitle || pausedTitle === "Unknown") return "PAUSED"
       return "PAUSED · " + pausedTitle.toUpperCase()
     }
@@ -134,6 +139,7 @@ function heroMeta(status) {
     }
     if (status.cart) return "CART · " + prettyName(status.cart).toUpperCase()
     if (status.drive8) return "READY. · DRIVE 8"
+    if (status.tape) return "READY. · TAPE"
     return "READY. · " + video
   }
   return "READY. · " + video
@@ -145,6 +151,14 @@ function drive8Label(status) {
     return status.drive8Exists === false ? (disk + " — missing") : disk
   }
   return "Empty. Choose a disk; does not start VICE."
+}
+
+function tapeLabel(status) {
+  if (status && status.tape) {
+    var tape = prettyName(status.tape)
+    return status.tapeExists === false ? (tape + " — missing") : tape
+  }
+  return "Empty. Choose a tape; does not start VICE."
 }
 
 function cartLabel(status) {
@@ -161,9 +175,12 @@ function cursorItems(status) {
   if (!found) return items
   items.push({ kind: "drive8" })
   if (status.drive8) items.push({ kind: "eject" })
+  items.push({ kind: "tape" })
+  if (status.tape) items.push({ kind: "ejectTape" })
   items.push({ kind: "cart" })
   if (status.cart) items.push({ kind: "ejectCart" })
   items.push({ kind: "play" })
+  items.push({ kind: "playTape" })
   items.push({ kind: "power" })
   if (status.running && status.running.active) {
     items.push({ kind: "pause" })

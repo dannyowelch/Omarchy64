@@ -17,19 +17,22 @@ MONITOR_PORT="6510"
 
 usage() {
   cat <<USAGE
-Usage: omarchy64-ctl <status|launch|play-last|basic|power|pause|reset|drive8|eject|cart|eject-cart|quit|browse|set|ensure-rules|install-emu> [arg]
+Usage: omarchy64-ctl <status|launch|launch-tape|play-last|basic|power|pause|reset|drive8|eject|tape|eject-tape|cart|eject-cart|quit|browse|set|ensure-rules|install-emu> [arg]
 
 Launch VICE (x64sc / x64).
   launch [image]   RUN the disk in drive 8, or IMAGE if given
-  basic            Power on; attaches drive 8 and the cartridge if set
+  launch-tape [image]  Autostart the tape, or IMAGE if given
+  basic            Power on; attaches drive 8, tape, and the cartridge if set
   power            Toggle: start if VICE is off, quit if it is on
   pause            Toggle VICE pause (same as Alt+P)
   reset            Soft-reset the running emulator (CPU reset)
   drive8 [image]   Set/attach a disk; does not start VICE
   eject            Empty drive 8
+  tape [image]     Set/attach a .t64; does not start VICE
+  eject-tape       Empty the tape drive
   cart [image]     Set/attach a .crt; does not start VICE
   eject-cart       Empty the cartridge slot
-  browse [--disks|--carts] File chooser starting in ~/Games/C64
+  browse [--disks|--tapes|--carts] File chooser starting in ~/Games/C64
 USAGE
 }
 
@@ -56,6 +59,7 @@ default_state() {
     lastImage: "",
     lastMode: "",
     drive8: "",
+    tape: "",
     cart: "",
     paused: false
   }'
@@ -77,6 +81,7 @@ read_state() {
       .lastImage = (.lastImage // "") |
       .lastMode = (.lastMode // "") |
       .drive8 = (.drive8 // "") |
+      .tape = (.tape // "") |
       .cart = (.cart // "") |
       .paused = (.paused == true)
     ' "$STATE_FILE" 2>/dev/null || default_state
@@ -428,9 +433,11 @@ vice_args() {
   args+=("-remotemonitor")
   args+=("-remotemonitoraddress" "ip4://${MONITOR_HOST}:${MONITOR_PORT}")
 
-  local drive8 cart
+  local drive8 tape cart
   drive8="$(jq -r '.drive8 // empty' <<<"$state")"
   drive8="${drive8/#\~/$HOME}"
+  tape="$(jq -r '.tape // empty' <<<"$state")"
+  tape="${tape/#\~/$HOME}"
   cart="$(jq -r '.cart // empty' <<<"$state")"
   cart="${cart/#\~/$HOME}"
 
@@ -448,6 +455,9 @@ vice_args() {
       if [[ -n $drive8 && -f $drive8 ]]; then
         args+=("-8" "$drive8")
       fi
+      if [[ -n $tape && -f $tape ]]; then
+        args+=("-1" "$tape")
+      fi
       ;;
     *) args+=("-autostart" "$image") ;;
     esac
@@ -462,6 +472,9 @@ vice_args() {
     fi
     if [[ -n $drive8 && -f $drive8 ]]; then
       args+=("-8" "$drive8")
+    fi
+    if [[ -n $tape && -f $tape ]]; then
+      args+=("-1" "$tape")
     fi
     ;;
   *) fail "unknown launch mode: $mode" ;;
@@ -521,6 +534,8 @@ record_session() {
       | .drive8 = (if $mode == "drive8" then $image
                    elif $mode == "autostart" and ($image | test("\\.(d64|g64|d71|d81|d80|d82|x64)$"; "i")) then $image
                    else (.drive8 // "") end)
+      | .tape = (if $mode == "autostart" and ($image | test("\\.(tap|t64)$"; "i")) then $image
+                 else (.tape // "") end)
       | .cart = (if $mode == "autostart" and ($image | test("\\.crt$"; "i")) then $image
                  else (.cart // "") end)
       | .paused = false
@@ -528,7 +543,7 @@ record_session() {
 }
 
 emit_status() {
-  local state emu pads games_dir pid image title mode drive8 cart paused=false
+  local state emu pads games_dir pid image title mode drive8 tape cart paused=false
   state="$(read_state)"
   emu="$(find_emulator)"
   pads="$(list_joysticks_json)"
@@ -539,11 +554,14 @@ emit_status() {
   title=""
   mode=""
   drive8="$(jq -r '.drive8 // empty' <<<"$state")"
+  tape="$(jq -r '.tape // empty' <<<"$state")"
   cart="$(jq -r '.cart // empty' <<<"$state")"
-  local drive8_exists=false cart_exists=false
+  local drive8_exists=false tape_exists=false cart_exists=false
   drive8="${drive8/#\~/$HOME}"
+  tape="${tape/#\~/$HOME}"
   cart="${cart/#\~/$HOME}"
   if [[ -n $drive8 && -f $drive8 ]]; then drive8_exists=true; fi
+  if [[ -n $tape && -f $tape ]]; then tape_exists=true; fi
   if [[ -n $cart && -f $cart ]]; then cart_exists=true; fi
   if [[ -n ${pid:-} ]]; then
     image="$(jq -r '.lastImage // empty' <<<"$state")"
@@ -564,6 +582,8 @@ emit_status() {
     --arg video "$(jq -r '.video' <<<"$state")" \
     --arg drive8 "$drive8" \
     --argjson drive8Exists "$([[ $drive8_exists == true ]] && echo true || echo false)" \
+    --arg tape "$tape" \
+    --argjson tapeExists "$([[ $tape_exists == true ]] && echo true || echo false)" \
     --arg cart "$cart" \
     --argjson cartExists "$([[ $cart_exists == true ]] && echo true || echo false)" \
     --arg lastMode "$(jq -r '.lastMode' <<<"$state")" \
@@ -583,6 +603,8 @@ emit_status() {
       video: $video,
       drive8: $drive8,
       drive8Exists: $drive8Exists,
+      tape: $tape,
+      tapeExists: $tapeExists,
       cart: $cart,
       cartExists: $cartExists,
       lastMode: $lastMode,
@@ -686,6 +708,12 @@ is_disk_image() {
   [[ $ext =~ ^(d64|g64|d71|d81|d80|d82|x64)$ ]]
 }
 
+is_tape_image() {
+  local ext="${1##*.}"
+  ext="${ext,,}"
+  [[ $ext =~ ^(tap|t64)$ ]]
+}
+
 is_cart_image() {
   local ext="${1##*.}"
   ext="${ext,,}"
@@ -714,6 +742,20 @@ cmd_launch() {
   ext="${image##*.}"
   ext="${ext,,}"
   [[ $ext =~ ^(prg|crt|d64|g64|tap|t64|d71|d81|d80|d82|x64)$ ]] || fail "unsupported image type: .$ext"
+  start_vice autostart "$image"
+}
+
+cmd_launch_tape() {
+  local image="${1:-}"
+  local state
+  state="$(read_state)"
+  if [[ -z $image ]]; then
+    image="$(jq -r '.tape // empty' <<<"$state")"
+  fi
+  [[ -n $image ]] || fail "no tape in the datasette"
+  image="${image/#\~/$HOME}"
+  [[ -f $image ]] || fail "image not found: $image"
+  is_tape_image "$image" || fail "LOAD TAPE needs a .t64 image"
   start_vice autostart "$image"
 }
 
@@ -793,6 +835,36 @@ cmd_eject() {
   emit_status
 }
 
+cmd_tape() {
+  local image="${1:-}" pid
+  [[ -n $image ]] || fail "no tape"
+  image="${image/#\~/$HOME}"
+  [[ -f $image ]] || fail "image not found: $image"
+  is_tape_image "$image" || fail "Tape needs a .t64 image"
+  image="$(realpath -e "$image")"
+
+  local state
+  state="$(read_state)"
+  write_state "$(jq -c --arg image "$image" '.tape = $image' <<<"$state")"
+  state="$(read_state)"
+  pid="$(running_pid "$state" || true)"
+  if [[ -n ${pid:-} ]]; then
+    vice_monitor "attach \"$(monitor_quote "$image")\" 1" || fail "VICE is running but the tape could not be attached. Try F12 → Tape."
+  fi
+  emit_status
+}
+
+cmd_eject_tape() {
+  local state pid
+  state="$(read_state)"
+  pid="$(running_pid "$state" || true)"
+  if [[ -n ${pid:-} ]]; then
+    vice_monitor "detach 1" || true
+  fi
+  write_state "$(jq -c '.tape = ""' <<<"$state")"
+  emit_status
+}
+
 # VICE Reset reloads CartridgeFile, not the live slot. attach/detach 32
 # only change the current session, which is why a cart inserted after
 # power-on did not survive Reset, and why eject+Reset still booted a
@@ -868,6 +940,11 @@ cmd_browse() {
     filter="Disk images | *.d64 *.D64 *.g64 *.G64 *.d71 *.D71 *.d81 *.D81 *.d80 *.D80 *.d82 *.D82"
     current="$(jq -r '.drive8 // empty' <<<"$state")"
     ;;
+  --tapes)
+    title="Tape"
+    filter="Tape images | *.t64 *.T64"
+    current="$(jq -r '.tape // empty' <<<"$state")"
+    ;;
   --carts)
     title="Cartridge"
     filter="Cartridge images | *.crt *.CRT"
@@ -875,7 +952,7 @@ cmd_browse() {
     ;;
   *)
     title='Load "*",8,1'
-    filter="C64 images | *.prg *.PRG *.crt *.CRT *.d64 *.D64 *.g64 *.G64 *.tap *.TAP *.t64 *.T64"
+    filter="C64 images | *.prg *.PRG *.crt *.CRT *.d64 *.D64 *.g64 *.G64 *.t64 *.T64 *.tap *.TAP"
     current="$(jq -r '.drive8 // empty' <<<"$state")"
     if [[ -z $current ]]; then
       current="$(jq -r '.cart // empty' <<<"$state")"
@@ -893,6 +970,8 @@ cmd_browse() {
       start="$parent/"
     elif [[ ${1:-} == --carts && -d $dir/Carts ]]; then
       start="$dir/Carts/"
+    elif [[ ${1:-} == --tapes && -d $dir/Tapes ]]; then
+      start="$dir/Tapes/"
     elif [[ ${1:-} == --disks && -d $dir/Disks ]]; then
       start="$dir/Disks/"
     fi
@@ -1017,12 +1096,15 @@ case "$cmd" in
 status) emit_status ;;
 launch) cmd_launch "${1:-}" ;;
 play-last) cmd_launch "" ;;
+launch-tape) cmd_launch_tape "${1:-}" ;;
 basic) cmd_basic ;;
 power) cmd_power ;;
 pause) cmd_pause ;;
 reset) cmd_reset ;;
 drive8) cmd_drive8 "${1:-}" ;;
 eject) cmd_eject ;;
+tape) cmd_tape "${1:-}" ;;
+eject-tape) cmd_eject_tape ;;
 cart) cmd_cart "${1:-}" ;;
 eject-cart) cmd_eject_cart ;;
 quit) quit_emu; emit_status ;;
