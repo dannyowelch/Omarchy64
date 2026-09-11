@@ -38,6 +38,14 @@ Panel {
   readonly property bool isPlaying: status.running && status.running.active
   readonly property bool isPaused: root.isPlaying && status.running.paused === true
   readonly property bool dropdownOpen: joystickBox.popupOpen === true
+  readonly property int ctlOutputCap: 65536
+  readonly property int ctlErrorCap: 4096
+  readonly property int browseOutputCap: 8192
+  readonly property int statusDeadlineMs: 8000
+  readonly property int ensureDeadlineMs: 8000
+  readonly property int actionDeadlineMs: 30000
+  readonly property int browseDeadlineMs: 300000
+  readonly property int killGraceMs: 1000
 
   function open() {
     refresh()
@@ -55,9 +63,73 @@ Panel {
   }
 
   function ingest(raw) {
-    root.status = Model.parseStatus(raw)
+    var text = String(raw || "")
+    if (text.length > root.ctlOutputCap) return
+    root.status = Model.parseStatus(text)
     if (root.selectedIndex > root.items.length - 1)
       root.selectedIndex = Model.clampIndex(root.selectedIndex, root.items.length)
+  }
+
+  function collectorBytes(collector) {
+    if (!collector) return 0
+    if (collector.data && collector.data.byteLength !== undefined)
+      return collector.data.byteLength
+    return String(collector.text || "").length
+  }
+
+  function boundedText(collector, cap) {
+    var text = String((collector && collector.text) || "")
+    if (text.length > cap) return text.substring(0, cap)
+    return text
+  }
+
+  function sendProcSignal(proc, sig) {
+    if (!proc) return
+    proc["signal"](sig)
+  }
+
+  function armProc(proc) {
+    proc.aborting = false
+    proc.abortReason = ""
+    proc.startedAt = Date.now()
+    proc.killAt = 0
+  }
+
+  function terminateProc(proc, reason) {
+    if (!proc) return
+    proc.aborting = true
+    proc.abortReason = reason || "controller timed out"
+    if (proc.running) {
+      proc.running = false
+      proc.killAt = Date.now() + root.killGraceMs
+    }
+  }
+
+  function killProc(proc) {
+    if (!proc || !proc.running) return
+    proc.aborting = true
+    root.sendProcSignal(proc, 9)
+  }
+
+  function checkDeadline(proc, deadlineMs, now) {
+    if (!proc || !proc.running) return
+    if (proc.killAt > 0 && now >= proc.killAt) {
+      root.killProc(proc)
+      return
+    }
+    if (proc.killAt === 0 && proc.startedAt > 0 && (now - proc.startedAt) >= deadlineMs)
+      root.terminateProc(proc, "controller timed out")
+  }
+
+  function checkOutputCap(proc, collector, cap, reason) {
+    if (!proc || proc.aborting) return
+    if (root.collectorBytes(collector) > cap)
+      root.terminateProc(proc, reason || "controller output too large")
+  }
+
+  function applyAbortError(proc) {
+    if (proc && proc.aborting && proc.abortReason)
+      root.lastError = proc.abortReason
   }
 
   function refresh() {
@@ -263,42 +335,83 @@ Panel {
     onTriggered: browseProc.running = true
   }
 
+  Timer {
+    id: procWatchdog
+    interval: 250
+    repeat: true
+    running: statusProc.running || actionProc.running || browseProc.running || ensureProc.running
+    onTriggered: {
+      var now = Date.now()
+      root.checkDeadline(statusProc, root.statusDeadlineMs, now)
+      root.checkDeadline(actionProc, root.actionDeadlineMs, now)
+      root.checkDeadline(browseProc, root.browseDeadlineMs, now)
+      root.checkDeadline(ensureProc, root.ensureDeadlineMs, now)
+    }
+  }
+
   Process {
     id: statusProc
+    property bool aborting: false
+    property string abortReason: ""
+    property double startedAt: 0
+    property double killAt: 0
     command: [root.ctl, "status"]
     stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.ingest(text)
+      waitForEnd: false
+      onDataChanged: root.checkOutputCap(statusProc, this, root.ctlOutputCap, "status output too large")
+      onStreamFinished: {
+        if (statusProc.aborting) return
+        root.ingest(root.boundedText(this, root.ctlOutputCap))
+      }
     }
+    onStarted: root.armProc(statusProc)
   }
 
   Process {
     id: ensureProc
+    property bool aborting: false
+    property string abortReason: ""
+    property double startedAt: 0
+    property double killAt: 0
     command: [root.ctl, "ensure-rules"]
+    onStarted: root.armProc(ensureProc)
   }
 
   Process {
     id: actionProc
+    property bool aborting: false
+    property string abortReason: ""
+    property double startedAt: 0
+    property double killAt: 0
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onDataChanged: root.checkOutputCap(actionProc, this, root.ctlOutputCap, "controller output too large")
       onStreamFinished: {
-        var raw = String(text || "").trim()
+        if (actionProc.aborting) return
+        var raw = root.boundedText(this, root.ctlOutputCap).trim()
         if (raw.charAt(0) === "{") root.ingest(raw)
       }
     }
     stderr: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onDataChanged: root.checkOutputCap(actionProc, this, root.ctlErrorCap, "controller error output too large")
       onStreamFinished: {
-        var err = String(text || "").trim()
+        if (actionProc.aborting) return
+        var err = root.boundedText(this, root.ctlErrorCap).trim()
         if (err) root.lastError = err.replace(/^omarchy64-ctl: /, "")
       }
     }
+    onStarted: root.armProc(actionProc)
     onExited: function(exitCode) {
       root.busy = false
       var launch = root.pendingLaunch
       var reopen = root.pendingReopen
       root.pendingLaunch = false
       root.pendingReopen = false
+      if (actionProc.aborting) {
+        root.applyAbortError(actionProc)
+        return
+      }
       if (launch && Number(exitCode) === 0) {
         root.close()
         return
@@ -310,11 +423,18 @@ Panel {
 
   Process {
     id: browseProc
+    property bool aborting: false
+    property string abortReason: ""
+    property double startedAt: 0
+    property double killAt: 0
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onDataChanged: root.checkOutputCap(browseProc, this, root.browseOutputCap, "file chooser output too large")
       onStreamFinished: {
-        var path = String(text || "").trim()
+        if (browseProc.aborting) return
+        var path = root.boundedText(this, root.browseOutputCap).trim()
         if (!path) return
+        if (path.indexOf("\n") >= 0 || path.indexOf("\0") >= 0) return
         if (root.browseThen === "drive8") {
           root.pendingReopen = !root.isPlaying
           root.runCtl(["drive8", path])
@@ -331,6 +451,8 @@ Panel {
         }
       }
     }
+    onStarted: root.armProc(browseProc)
+    onExited: root.applyAbortError(browseProc)
   }
 
   IpcHandler {
