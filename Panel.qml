@@ -30,6 +30,7 @@ Panel {
     return decodeURIComponent(s.replace(/\/$/, ""))
   }
   readonly property string ctl: pluginDir + "/omarchy64-ctl"
+  readonly property string runner: pluginDir + "/omarchy64-run.py"
   readonly property var items: Model.cursorItems(status)
   readonly property color contentForeground: bar ? bar.foreground : Color.foreground
   readonly property color contentDim: Qt.darker(contentForeground, 1.4)
@@ -46,6 +47,19 @@ Panel {
   readonly property int actionDeadlineMs: 30000
   readonly property int browseDeadlineMs: 300000
   readonly property int killGraceMs: 1000
+  function buildCtlEnv() {
+    var env = { PATH: "/usr/bin:/bin", LC_ALL: "C" }
+    var keys = ["HOME", "USER", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR",
+                "HYPRLAND_INSTANCE_SIGNATURE", "WAYLAND_DISPLAY", "DISPLAY",
+                "DBUS_SESSION_BUS_ADDRESS", "LANG"]
+    for (var i = 0; i < keys.length; i++) {
+      var value = Quickshell.env(keys[i])
+      if (value) env[keys[i]] = value
+    }
+    return env
+  }
+
+  readonly property var ctlEnv: buildCtlEnv()
 
   function open() {
     refresh()
@@ -70,17 +84,19 @@ Panel {
       root.selectedIndex = Model.clampIndex(root.selectedIndex, root.items.length)
   }
 
-  function collectorBytes(collector) {
-    if (!collector) return 0
-    if (collector.data && collector.data.byteLength !== undefined)
-      return collector.data.byteLength
-    return String(collector.text || "").length
+  function plain(value, cap) {
+    var text = String(value || "").replace(/[<>&]/g, "")
+    if (cap && text.length > cap) text = text.substring(0, cap)
+    return text
   }
 
-  function boundedText(collector, cap) {
-    var text = String((collector && collector.text) || "")
-    if (text.length > cap) return text.substring(0, cap)
-    return text
+  function ctlCommand(args, outCap, errCap, termMs) {
+    return ["/usr/bin/python3", "-I", "-S", root.runner,
+            "--term-ms", String(termMs),
+            "--kill-ms", String(root.killGraceMs),
+            "--out-bytes", String(outCap),
+            "--err-bytes", String(errCap),
+            "--", root.ctl].concat(args)
   }
 
   function sendProcSignal(proc, sig) {
@@ -93,43 +109,55 @@ Panel {
     proc.abortReason = ""
     proc.startedAt = Date.now()
     proc.killAt = 0
+    proc.outAcc = ""
+    proc.errAcc = ""
+    proc.outBytes = 0
+    proc.errBytes = 0
+    proc.leaderPid = proc.processId || 0
   }
 
   function terminateProc(proc, reason) {
     if (!proc) return
     proc.aborting = true
     proc.abortReason = reason || "controller timed out"
-    if (proc.running) {
-      proc.running = false
-      proc.killAt = Date.now() + root.killGraceMs
-    }
-  }
-
-  function killProc(proc) {
-    if (!proc || !proc.running) return
-    proc.aborting = true
-    root.sendProcSignal(proc, 9)
+    proc.killAt = Date.now() + root.killGraceMs
+    root.sendProcSignal(proc, 15)
   }
 
   function checkDeadline(proc, deadlineMs, now) {
-    if (!proc || !proc.running) return
+    if (!proc) return
     if (proc.killAt > 0 && now >= proc.killAt) {
-      root.killProc(proc)
+      root.sendProcSignal(proc, 9)
+      proc.killAt = 0
       return
     }
+    if (!proc.running) return
     if (proc.killAt === 0 && proc.startedAt > 0 && (now - proc.startedAt) >= deadlineMs)
       root.terminateProc(proc, "controller timed out")
   }
 
-  function checkOutputCap(proc, collector, cap, reason) {
+  function onProcChunk(proc, data, isErr) {
     if (!proc || proc.aborting) return
-    if (root.collectorBytes(collector) > cap)
-      root.terminateProc(proc, reason || "controller output too large")
+    var chunk = String(data || "")
+    var n = chunk.length
+    if (isErr) {
+      proc.errBytes += n
+      if (proc.errAcc.length < proc.errCap)
+        proc.errAcc += chunk.substring(0, proc.errCap - proc.errAcc.length)
+      if (proc.errBytes > proc.errCap)
+        root.terminateProc(proc, "controller error output too large")
+    } else {
+      proc.outBytes += n
+      if (proc.outAcc.length < proc.outCap)
+        proc.outAcc += chunk.substring(0, proc.outCap - proc.outAcc.length)
+      if (proc.outBytes > proc.outCap)
+        root.terminateProc(proc, "controller output too large")
+    }
   }
 
   function applyAbortError(proc) {
     if (proc && proc.aborting && proc.abortReason)
-      root.lastError = proc.abortReason
+      root.lastError = root.plain(proc.abortReason, 240)
   }
 
   function refresh() {
@@ -141,7 +169,7 @@ Panel {
     root.lastError = ""
     root.busy = true
     root.pendingLaunch = isLaunch === true
-    actionProc.command = [root.ctl].concat(args)
+    actionProc.command = root.ctlCommand(args, root.ctlOutputCap, root.ctlErrorCap, root.actionDeadlineMs)
     actionProc.running = true
   }
 
@@ -253,10 +281,10 @@ Panel {
     root.lastError = ""
     root.browseThen = mode
     root.pendingReopen = false
-    if (mode === "drive8") browseProc.command = [root.ctl, "browse", "--disks"]
-    else if (mode === "tape" || mode === "launchTape") browseProc.command = [root.ctl, "browse", "--tapes"]
-    else if (mode === "cart") browseProc.command = [root.ctl, "browse", "--carts"]
-    else browseProc.command = [root.ctl, "browse"]
+    if (mode === "drive8") browseProc.command = root.ctlCommand(["browse", "--disks"], root.browseOutputCap, root.ctlErrorCap, root.browseDeadlineMs)
+    else if (mode === "tape" || mode === "launchTape") browseProc.command = root.ctlCommand(["browse", "--tapes"], root.browseOutputCap, root.ctlErrorCap, root.browseDeadlineMs)
+    else if (mode === "cart") browseProc.command = root.ctlCommand(["browse", "--carts"], root.browseOutputCap, root.ctlErrorCap, root.browseDeadlineMs)
+    else browseProc.command = root.ctlCommand(["browse"], root.browseOutputCap, root.ctlErrorCap, root.browseDeadlineMs)
     // The panel is a layer-shell overlay, so zenity cannot stack above it.
     if (root.opened) root.close()
     browseStartTimer.restart()
@@ -313,6 +341,13 @@ Panel {
     ensureProc.running = true
   }
 
+  Component.onDestruction: {
+    root.terminateProc(statusProc, "plugin unloading")
+    root.terminateProc(actionProc, "plugin unloading")
+    root.terminateProc(browseProc, "plugin unloading")
+    root.terminateProc(ensureProc, "plugin unloading")
+  }
+
   onOpenedChanged: {
     if (opened) {
       refresh()
@@ -339,7 +374,8 @@ Panel {
     id: procWatchdog
     interval: 250
     repeat: true
-    running: statusProc.running || actionProc.running || browseProc.running || ensureProc.running
+    running: statusProc.running || actionProc.running || browseProc.running || ensureProc.running ||
+             statusProc.killAt > 0 || actionProc.killAt > 0 || browseProc.killAt > 0 || ensureProc.killAt > 0
     onTriggered: {
       var now = Date.now()
       root.checkDeadline(statusProc, root.statusDeadlineMs, now)
@@ -355,16 +391,29 @@ Panel {
     property string abortReason: ""
     property double startedAt: 0
     property double killAt: 0
-    command: [root.ctl, "status"]
-    stdout: StdioCollector {
-      waitForEnd: false
-      onDataChanged: root.checkOutputCap(statusProc, this, root.ctlOutputCap, "status output too large")
-      onStreamFinished: {
-        if (statusProc.aborting) return
-        root.ingest(root.boundedText(this, root.ctlOutputCap))
-      }
+    property string outAcc: ""
+    property string errAcc: ""
+    property int outBytes: 0
+    property int errBytes: 0
+    property int outCap: root.ctlOutputCap
+    property int errCap: root.ctlErrorCap
+    property var leaderPid: 0
+    clearEnvironment: true
+    environment: root.ctlEnv
+    command: root.ctlCommand(["status"], root.ctlOutputCap, root.ctlErrorCap, root.statusDeadlineMs)
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(data) { root.onProcChunk(statusProc, data, false) }
+    }
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function(data) { root.onProcChunk(statusProc, data, true) }
     }
     onStarted: root.armProc(statusProc)
+    onExited: {
+      if (statusProc.aborting) return
+      root.ingest(statusProc.outAcc)
+    }
   }
 
   Process {
@@ -373,7 +422,24 @@ Panel {
     property string abortReason: ""
     property double startedAt: 0
     property double killAt: 0
-    command: [root.ctl, "ensure-rules"]
+    property string outAcc: ""
+    property string errAcc: ""
+    property int outBytes: 0
+    property int errBytes: 0
+    property int outCap: root.ctlOutputCap
+    property int errCap: root.ctlErrorCap
+    property var leaderPid: 0
+    clearEnvironment: true
+    environment: root.ctlEnv
+    command: root.ctlCommand(["ensure-rules"], root.ctlOutputCap, root.ctlErrorCap, root.ensureDeadlineMs)
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(data) { root.onProcChunk(ensureProc, data, false) }
+    }
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function(data) { root.onProcChunk(ensureProc, data, true) }
+    }
     onStarted: root.armProc(ensureProc)
   }
 
@@ -383,23 +449,22 @@ Panel {
     property string abortReason: ""
     property double startedAt: 0
     property double killAt: 0
-    stdout: StdioCollector {
-      waitForEnd: false
-      onDataChanged: root.checkOutputCap(actionProc, this, root.ctlOutputCap, "controller output too large")
-      onStreamFinished: {
-        if (actionProc.aborting) return
-        var raw = root.boundedText(this, root.ctlOutputCap).trim()
-        if (raw.charAt(0) === "{") root.ingest(raw)
-      }
+    property string outAcc: ""
+    property string errAcc: ""
+    property int outBytes: 0
+    property int errBytes: 0
+    property int outCap: root.ctlOutputCap
+    property int errCap: root.ctlErrorCap
+    property var leaderPid: 0
+    clearEnvironment: true
+    environment: root.ctlEnv
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(data) { root.onProcChunk(actionProc, data, false) }
     }
-    stderr: StdioCollector {
-      waitForEnd: false
-      onDataChanged: root.checkOutputCap(actionProc, this, root.ctlErrorCap, "controller error output too large")
-      onStreamFinished: {
-        if (actionProc.aborting) return
-        var err = root.boundedText(this, root.ctlErrorCap).trim()
-        if (err) root.lastError = err.replace(/^omarchy64-ctl: /, "")
-      }
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function(data) { root.onProcChunk(actionProc, data, true) }
     }
     onStarted: root.armProc(actionProc)
     onExited: function(exitCode) {
@@ -412,6 +477,10 @@ Panel {
         root.applyAbortError(actionProc)
         return
       }
+      var raw = String(actionProc.outAcc || "").trim()
+      if (raw.charAt(0) === "{") root.ingest(raw)
+      var err = String(actionProc.errAcc || "").trim()
+      if (err) root.lastError = root.plain(err.replace(/^omarchy64-ctl: /, "").replace(/^omarchy64-run: /, ""), 240)
       if (launch && Number(exitCode) === 0) {
         root.close()
         return
@@ -427,32 +496,48 @@ Panel {
     property string abortReason: ""
     property double startedAt: 0
     property double killAt: 0
-    stdout: StdioCollector {
-      waitForEnd: false
-      onDataChanged: root.checkOutputCap(browseProc, this, root.browseOutputCap, "file chooser output too large")
-      onStreamFinished: {
-        if (browseProc.aborting) return
-        var path = root.boundedText(this, root.browseOutputCap).trim()
-        if (!path) return
-        if (path.indexOf("\n") >= 0 || path.indexOf("\0") >= 0) return
-        if (root.browseThen === "drive8") {
-          root.pendingReopen = !root.isPlaying
-          root.runCtl(["drive8", path])
-        } else if (root.browseThen === "tape") {
-          root.pendingReopen = !root.isPlaying
-          root.runCtl(["tape", path])
-        } else if (root.browseThen === "launchTape") {
-          root.runCtl(["launch-tape", path], true)
-        } else if (root.browseThen === "cart") {
-          root.pendingReopen = !root.isPlaying
-          root.runCtl(["cart", path])
-        } else {
-          root.launchPath(path)
-        }
-      }
+    property string outAcc: ""
+    property string errAcc: ""
+    property int outBytes: 0
+    property int errBytes: 0
+    property int outCap: root.browseOutputCap
+    property int errCap: root.ctlErrorCap
+    property var leaderPid: 0
+    clearEnvironment: true
+    environment: root.ctlEnv
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(data) { root.onProcChunk(browseProc, data, false) }
+    }
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function(data) { root.onProcChunk(browseProc, data, true) }
     }
     onStarted: root.armProc(browseProc)
-    onExited: root.applyAbortError(browseProc)
+    onExited: {
+      if (browseProc.aborting) {
+        root.applyAbortError(browseProc)
+        return
+      }
+      var path = String(browseProc.outAcc || "").trim()
+      if (!path) return
+      if (path.indexOf("\n") >= 0 || path.indexOf("\0") >= 0) return
+      if (path.length > root.browseOutputCap) return
+      if (root.browseThen === "drive8") {
+        root.pendingReopen = !root.isPlaying
+        root.runCtl(["drive8", path])
+      } else if (root.browseThen === "tape") {
+        root.pendingReopen = !root.isPlaying
+        root.runCtl(["tape", path])
+      } else if (root.browseThen === "launchTape") {
+        root.runCtl(["launch-tape", path], true)
+      } else if (root.browseThen === "cart") {
+        root.pendingReopen = !root.isPlaying
+        root.runCtl(["cart", path])
+      } else {
+        root.launchPath(path)
+      }
+    }
   }
 
   IpcHandler {
@@ -526,7 +611,7 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    tooltipText: root.isPaused ? "Omarchy64 · paused" : (root.isPlaying ? ("Omarchy64 · " + (status.running.title || "READY.")) : "Omarchy64")
+    tooltipText: root.plain(root.isPaused ? "Omarchy64 · paused" : (root.isPlaying ? ("Omarchy64 · " + (status.running.title || "READY.")) : "Omarchy64"), 80)
     iconComponent: Component {
       Item {
         Icon64 {
@@ -603,8 +688,8 @@ Panel {
           PanelHero {
             width: parent.width
             title: "Omarchy64"
-            meta: Model.heroMeta(root.status)
-            detail: root.emulatorFound ? Model.videoLabel(root.status) : ""
+            meta: root.plain(Model.heroMeta(root.status), 80)
+            detail: root.plain(root.emulatorFound ? Model.videoLabel(root.status) : "", 80)
             foreground: root.contentForeground
             fontFamily: root.contentFontFamily
             iconOpacity: root.emulatorFound ? 1.0 : 0.55
@@ -626,6 +711,7 @@ Panel {
             visible: !root.emulatorFound
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               wrapMode: Text.WordWrap
               text: "VICE is not installed. The SDL2 package is the one this plugin launches:"
@@ -635,6 +721,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               wrapMode: Text.WrapAnywhere
               text: "omarchy pkg add vice-sdl2"
@@ -680,6 +767,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               text: Model.drive8Label(root.status)
               color: root.contentDim
@@ -718,6 +806,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               text: Model.tapeLabel(root.status)
               color: root.contentDim
@@ -756,6 +845,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               text: Model.cartLabel(root.status)
               color: root.contentDim
@@ -877,6 +967,7 @@ Panel {
                 spacing: Style.spacing.labelGap
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "C64 PORT"
                   color: root.contentDim
                   font.family: root.contentFontFamily
@@ -910,6 +1001,7 @@ Panel {
                 spacing: Style.spacing.labelGap
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "VIDEO"
                   color: root.contentDim
                   font.family: root.contentFontFamily
@@ -939,10 +1031,11 @@ Panel {
             visible: root.emulatorFound
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               visible: root.lastError !== ""
               wrapMode: Text.WordWrap
-              text: root.lastError
+              text: root.plain(root.lastError, 240)
               color: root.contentForeground
               font.family: root.contentFontFamily
               font.pixelSize: Style.font.caption
@@ -951,6 +1044,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               wrapMode: Text.WordWrap
               text: "Drive 8, Tape, and Cartridge stay inserted. Load runs a disk. LOAD TAPE autostarts the cassette. Power starts or stops VICE. Pause and Reset apply while it is running. Pads use stick or D-pad plus fire; keyboard is arrows and Space."

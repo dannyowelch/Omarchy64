@@ -53,8 +53,8 @@ function parseStatus(raw) {
     status.cart = parsed.cart || ""
     status.cartExists = parsed.cartExists === true
     status.lastMode = parsed.lastMode || ""
-    status.joysticks = Array.isArray(parsed.joysticks) ? parsed.joysticks : []
-    status.lastError = parsed.lastError || ""
+    status.joysticks = Array.isArray(parsed.joysticks) ? parsed.joysticks.slice(0, 16) : []
+    status.lastError = String(parsed.lastError || "").substring(0, 240)
     return status
   } catch (e) {
     return status
