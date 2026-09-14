@@ -8,6 +8,7 @@ function emptyStatus() {
     joystick: "auto",
     warp: true,
     video: "pal",
+    windowMode: "fullscreen",
     drive8: "",
     drive8Exists: false,
     tape: "",
@@ -46,6 +47,7 @@ function parseStatus(raw) {
     status.joystick = parsed.joystick || "auto"
     status.warp = parsed.warp !== false
     status.video = parsed.video === "ntsc" ? "ntsc" : "pal"
+    status.windowMode = parsed.windowMode === "floating" ? "floating" : "fullscreen"
     status.drive8 = parsed.drive8 || ""
     status.drive8Exists = parsed.drive8Exists === true
     status.tape = parsed.tape || ""
@@ -96,6 +98,13 @@ function videoOptions() {
   return [
     { value: "pal", label: "PAL" },
     { value: "ntsc", label: "NTSC" }
+  ]
+}
+
+function windowOptions() {
+  return [
+    { value: "fullscreen", label: "Fullscreen" },
+    { value: "floating", label: "Floating" }
   ]
 }
 
@@ -186,6 +195,8 @@ function cursorItems(status) {
     items.push({ kind: "pause" })
     items.push({ kind: "reset" })
   }
+  items.push({ kind: "fullscreen" })
+  items.push({ kind: "floating" })
   items.push({ kind: "joystick" })
   items.push({ kind: "port" })
   items.push({ kind: "video" })
@@ -205,4 +216,8 @@ function nextPort(current) {
 
 function nextVideo(current) {
   return current === "ntsc" ? "pal" : "ntsc"
+}
+
+function nextWindowMode(current) {
+  return current === "floating" ? "fullscreen" : "floating"
 }

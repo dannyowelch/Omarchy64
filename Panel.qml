@@ -328,6 +328,8 @@ Panel {
     else if (kind === "joystick") joystickBox.toggle()
     else if (kind === "port") setPref("joystickPort", Model.nextPort(status.joystickPort))
     else if (kind === "video") setPref("video", Model.nextVideo(status.video))
+    else if (kind === "fullscreen") setPref("windowMode", "fullscreen")
+    else if (kind === "floating") setPref("windowMode", "floating")
   }
 
   function focusKind(kind) {
@@ -641,7 +643,7 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(400))
-    contentHeight: panel.fittedContentHeight(panelColumn.implicitHeight, Style.space(560))
+    contentHeight: panel.fittedContentHeight(panelColumn.implicitHeight)
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -667,6 +669,7 @@ Panel {
         else if (t === "p" || t === "P") root.togglePause()
         else if (t === "q" || t === "Q") root.quitEmu()
         else if (t === "r" || t === "R") root.resetEmu()
+        else if (t === "f" || t === "F") root.setPref("windowMode", Model.nextWindowMode(root.status.windowMode))
       }
 
       Flickable {
@@ -925,6 +928,41 @@ Panel {
                 onClicked: root.resetEmu()
               }
             }
+
+            PanelSeparator {
+              foreground: root.contentForeground
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Button {
+                width: (parent.width - parent.spacing) / 2
+                text: "Fullscreen"
+                bordered: true
+                active: String(root.status.windowMode || "fullscreen") !== "floating"
+                hasCursor: root.hasCursorKind("fullscreen")
+                foreground: root.contentForeground
+                fontFamily: root.contentFontFamily
+                enabled: !root.busy
+                onHovered: function(h) { if (h) root.focusKind("fullscreen") }
+                onClicked: root.setPref("windowMode", "fullscreen")
+              }
+
+              Button {
+                width: (parent.width - parent.spacing) / 2
+                text: "Floating"
+                bordered: true
+                active: String(root.status.windowMode) === "floating"
+                hasCursor: root.hasCursorKind("floating")
+                foreground: root.contentForeground
+                fontFamily: root.contentFontFamily
+                enabled: !root.busy
+                onHovered: function(h) { if (h) root.focusKind("floating") }
+                onClicked: root.setPref("windowMode", "floating")
+              }
+            }
           }
 
           PanelSeparator {
@@ -1047,7 +1085,7 @@ Panel {
               textFormat: Text.PlainText
               width: parent.width
               wrapMode: Text.WordWrap
-              text: "Drive 8, Tape, and Cartridge stay inserted. Load runs a disk. LOAD TAPE autostarts the cassette. Power starts or stops VICE. Pause and Reset apply while it is running. Pads use stick or D-pad plus fire; keyboard is arrows and Space."
+              text: "Drive 8, Tape, and Cartridge stay inserted. Load runs a disk. LOAD TAPE autostarts the cassette. Power starts or stops VICE. Pause and Reset apply while it is running. Fullscreen uses workspace 64; Floating keeps a window on the current workspace. Pads use stick or D-pad plus fire; keyboard is arrows and Space."
               color: root.contentDim
               font.family: root.contentFontFamily
               font.pixelSize: Style.font.caption

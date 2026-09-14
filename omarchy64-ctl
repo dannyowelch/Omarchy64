@@ -64,6 +64,7 @@ default_state() {
     joystickPort: 2,
     joystick: "auto",
     fullscreen: false,
+    windowMode: "fullscreen",
     warp: true,
     video: "pal",
     recents: [],
@@ -73,7 +74,9 @@ default_state() {
     drive8: "",
     tape: "",
     cart: "",
-    paused: false
+    paused: false,
+    floatWidth: 0,
+    floatHeight: 0
   }'
 }
 
@@ -91,6 +94,7 @@ read_state() {
       .joystickPort = (.joystickPort // 2) |
       .joystick = (.joystick // "auto") |
       .fullscreen = (.fullscreen // false) |
+      .windowMode = (if .windowMode == "floating" then "floating" else "fullscreen" end) |
       .warp = (.warp != false) |
       .video = (if .video == "ntsc" then "ntsc" else "pal" end) |
       .recents = (.recents // []) |
@@ -100,7 +104,9 @@ read_state() {
       .drive8 = (.drive8 // "") |
       .tape = (.tape // "") |
       .cart = (.cart // "") |
-      .paused = (.paused == true)
+      .paused = (.paused == true) |
+      .floatWidth = (try (.floatWidth | tonumber) catch 0 | if . > 0 then floor else 0 end) |
+      .floatHeight = (try (.floatHeight | tonumber) catch 0 | if . > 0 then floor else 0 end)
     ' 2>/dev/null || default_state
   else
     default_state
@@ -476,20 +482,192 @@ lua_long_string() {
   done
 }
 
+hypr_dispatch() {
+  local lua="$1" out
+  if ! out="$(/usr/bin/hyprctl dispatch "$lua" 2>&1 | /usr/bin/head -c 4097)"; then
+    return 1
+  fi
+  [[ ${#out} -le 4096 ]] || return 1
+}
+
 hypr_exec() {
+  local rules="$1"
   shift
-  local cmd quoted out
+  local cmd quoted
   cmd="$(printf '%q ' "$@")"
   cmd="${cmd% }"
   quoted="$(lua_long_string "$cmd")"
-  if ! out="$(/usr/bin/hyprctl dispatch "hl.dsp.exec_cmd(${quoted}, { workspace = \"64\" })" 2>&1 | /usr/bin/head -c 4097)"; then
-    fail "hyprctl exec failed: $out"
-  fi
-  [[ ${#out} -le 4096 ]] || fail "hyprctl output too large"
+  hypr_dispatch "hl.dsp.exec_cmd(${quoted}, ${rules})" || fail "hyprctl exec failed"
 }
 
 focus_workspace() {
   /usr/bin/hyprctl dispatch 'hl.dsp.focus({ workspace = 64 })' >/dev/null || true
+}
+
+window_mode_from() {
+  local mode
+  mode="$(/usr/bin/jq -r '.windowMode // "fullscreen"' <<<"$1")"
+  if [[ $mode == floating ]]; then
+    printf '%s\n' "floating"
+  else
+    printf '%s\n' "fullscreen"
+  fi
+}
+
+vice_window_address() {
+  /usr/bin/hyprctl clients -j 2>/dev/null | /usr/bin/jq -r \
+    '[.[] | select(.class == "x64sc" or .class == "x64" or .class == "VICE") | .address] | first // empty' \
+    | /usr/bin/head -c 64
+}
+
+# address width height floating(0/1)
+vice_window_geom() {
+  /usr/bin/hyprctl clients -j 2>/dev/null | /usr/bin/jq -r \
+    '[.[] | select(.class == "x64sc" or .class == "x64" or .class == "VICE")] | first |
+     if . == null then empty
+     else "\(.address) \(.size[0]) \(.size[1]) \(if .floating == true then 1 else 0 end)"
+     end' | /usr/bin/head -c 128
+}
+
+active_workspace_id() {
+  /usr/bin/hyprctl activeworkspace -j 2>/dev/null | /usr/bin/jq -r '.id // empty' | /usr/bin/head -c 16
+}
+
+focused_monitor_wh() {
+  # hyprctl clients[].size is in layout pixels (after scale). Monitor
+  # width/height are physical, so divide by scale before comparing.
+  /usr/bin/hyprctl monitors -j 2>/dev/null | /usr/bin/jq -r \
+    '([.[] | select(.focused == true)] | first // .[0] // empty) |
+     if . == null then empty
+     else "\((.width / (.scale // 1)) | floor) \((.height / (.scale // 1)) | floor)"
+     end' | /usr/bin/head -c 32
+}
+
+# VICE SDL canvas at 1x, from the SDLVideo log line (NTSC 768x494, PAL ~768x544).
+vice_canvas_wh() {
+  if [[ ${1:-} == ntsc ]]; then
+    printf '%s %s\n' 768 494
+  else
+    printf '%s %s\n' 768 544
+  fi
+}
+
+clamp_wh_to_monitor() {
+  local w="$1" h="$2" mw="$3" mh="$4"
+  local maxw maxh
+  maxw=$((mw * 90 / 100))
+  maxh=$((mh * 90 / 100))
+  (( maxw < 320 )) && maxw=320
+  (( maxh < 200 )) && maxh=200
+  if (( w > maxw )); then
+    h=$((h * maxw / w))
+    w=$maxw
+  fi
+  if (( h > maxh )); then
+    w=$((w * maxh / h))
+    h=$maxh
+  fi
+  (( w < 320 )) && w=320
+  (( h < 200 )) && h=200
+  printf '%s %s\n' "$w" "$h"
+}
+
+# True if this looks like a real floating game window, not a leftover
+# tile-to-float stub and not a near-fullscreen tile.
+plausible_float_wh() {
+  local w="$1" h="$2" mw="$3" mh="$4" cw="$5" ch="$6"
+  [[ $w =~ ^[1-9][0-9]*$ && $h =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ $mw =~ ^[1-9][0-9]*$ && $mh =~ ^[1-9][0-9]*$ ]] || return 1
+  (( w >= cw * 9 / 10 && h >= ch * 9 / 10 )) || return 1
+  (( w <= mw * 90 / 100 && h <= mh * 90 / 100 )) || return 1
+  return 0
+}
+
+default_float_wh() {
+  local cw="$1" ch="$2" mw="$3" mh="$4"
+  local maxw maxh s=1
+  maxw=$((mw * 70 / 100))
+  maxh=$((mh * 70 / 100))
+  while (( (s + 1) * cw <= maxw && (s + 1) * ch <= maxh )); do
+    s=$((s + 1))
+  done
+  printf '%s %s\n' "$((cw * s))" "$((ch * s))"
+}
+
+remember_float_wh() {
+  local w="$1" h="$2" state
+  [[ $w =~ ^[1-9][0-9]*$ && $h =~ ^[1-9][0-9]*$ ]] || return 0
+  state="$(read_state)"
+  write_state "$(/usr/bin/jq -c --argjson w "$w" --argjson h "$h" '.floatWidth = $w | .floatHeight = $h' <<<"$state")"
+}
+
+remember_current_float_size() {
+  local geom addr w h floating mw mh cw ch video
+  geom="$(vice_window_geom)"
+  [[ -n $geom ]] || return 0
+  read -r addr w h floating <<<"$geom"
+  [[ $floating == 1 ]] || return 0
+  read -r mw mh <<<"$(focused_monitor_wh)"
+  [[ -n $mw ]] || return 0
+  video="$(/usr/bin/jq -r '.video // "pal"' <<<"$(read_state)")"
+  read -r cw ch <<<"$(vice_canvas_wh "$video")"
+  plausible_float_wh "$w" "$h" "$mw" "$mh" "$cw" "$ch" || return 0
+  remember_float_wh "$w" "$h"
+}
+
+# Fullscreen: dedicated workspace 64 (the original launch). Floating: a
+# centered window on the workspace the user is looking at. Tile-to-float
+# otherwise drops to a stub size and VICE integer-scales down with it, so
+# restore the last good floating size (or a canvas-fit default).
+apply_window_mode() {
+  local mode="$1"
+  local geom addr w h floating window ws mw mh cw ch tw th sw sh video state
+  geom="$(vice_window_geom)"
+  [[ -n $geom ]] || return 1
+  read -r addr w h floating <<<"$geom"
+  [[ $addr =~ ^0x[0-9a-fA-F]+$ ]] || return 1
+  window="address:$addr"
+  if [[ $mode == floating ]]; then
+    ws="$(active_workspace_id)"
+    read -r mw mh <<<"$(focused_monitor_wh)"
+    [[ $mw =~ ^[1-9][0-9]*$ && $mh =~ ^[1-9][0-9]*$ ]] || return 1
+    state="$(read_state)"
+    video="$(/usr/bin/jq -r '.video // "pal"' <<<"$state")"
+    read -r cw ch <<<"$(vice_canvas_wh "$video")"
+    sw="$(/usr/bin/jq -r '.floatWidth // 0' <<<"$state")"
+    sh="$(/usr/bin/jq -r '.floatHeight // 0' <<<"$state")"
+    hypr_dispatch "hl.dsp.window.fullscreen({ window = \"$window\", action = \"unset\" })" || return 1
+    hypr_dispatch "hl.dsp.window.float({ window = \"$window\", action = \"enable\" })" || return 1
+    geom="$(vice_window_geom)"
+    if [[ -n $geom ]]; then
+      read -r addr w h floating <<<"$geom"
+    fi
+    tw=0
+    th=0
+    if plausible_float_wh "$sw" "$sh" "$mw" "$mh" "$cw" "$ch"; then
+      read -r tw th <<<"$(clamp_wh_to_monitor "$sw" "$sh" "$mw" "$mh")"
+    elif plausible_float_wh "$w" "$h" "$mw" "$mh" "$cw" "$ch"; then
+      tw=$w
+      th=$h
+    else
+      read -r tw th <<<"$(default_float_wh "$cw" "$ch" "$mw" "$mh")"
+    fi
+    if [[ $tw =~ ^[1-9][0-9]*$ && $th =~ ^[1-9][0-9]*$ ]]; then
+      hypr_dispatch "hl.dsp.window.resize({ window = \"$window\", x = $tw, y = $th, relative = false })" || return 1
+    fi
+    if [[ $ws =~ ^[0-9]+$ ]]; then
+      hypr_dispatch "hl.dsp.window.move({ window = \"$window\", workspace = \"$ws\", follow = true })" || return 1
+    fi
+    hypr_dispatch "hl.dsp.window.center({ window = \"$window\" })" || return 1
+    remember_current_float_size
+  else
+    if [[ $floating == 1 ]]; then
+      remember_current_float_size
+    fi
+    hypr_dispatch "hl.dsp.window.fullscreen({ window = \"$window\", action = \"unset\" })" || return 1
+    hypr_dispatch "hl.dsp.window.float({ window = \"$window\", action = \"disable\" })" || return 1
+    hypr_dispatch "hl.dsp.window.move({ window = \"$window\", workspace = \"64\", follow = true })" || return 1
+  fi
 }
 
 record_session() {
@@ -564,6 +742,7 @@ emit_status() {
     --arg joystick "$(/usr/bin/jq -r '.joystick' <<<"$state")" \
     --argjson warp "$(/usr/bin/jq -r '.warp' <<<"$state")" \
     --arg video "$(/usr/bin/jq -r '.video' <<<"$state")" \
+    --arg windowMode "$(window_mode_from "$state")" \
     --arg drive8 "$drive8" \
     --argjson drive8Exists "$([[ $drive8_exists == true ]] && echo true || echo false)" \
     --arg tape "$tape" \
@@ -585,6 +764,7 @@ emit_status() {
       joystick: $joystick,
       warp: $warp,
       video: $video,
+      windowMode: $windowMode,
       drive8: $drive8,
       drive8Exists: $drive8Exists,
       tape: $tape,
@@ -646,8 +826,14 @@ start_vice() {
   fi
 
   need /usr/bin/hyprctl
-  hypr_exec 64 "${wrapped[@]}"
-  focus_workspace
+  local windowMode
+  windowMode="$(window_mode_from "$state")"
+  if [[ $windowMode == floating ]]; then
+    hypr_exec '{ float = true, center = true }' "${wrapped[@]}"
+  else
+    hypr_exec '{ workspace = "64" }' "${wrapped[@]}"
+    focus_workspace
+  fi
 
   local pid=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
@@ -663,6 +849,14 @@ start_vice() {
   # Monitor comes up after the window; push the same mapping live so a
   # later panel change and the initial launch share one code path.
   local i
+  for i in 1 2 3 4 5 6 7 8; do
+    apply_window_mode "$windowMode" && break
+    /usr/bin/sleep 0.15
+  done
+  if [[ $windowMode == floating ]]; then
+    /usr/bin/sleep 0.15
+    remember_current_float_size
+  fi
   for i in 1 2 3 4 5 6 7 8; do
     apply_controls "$(read_state)" && break
     /usr/bin/sleep 0.15
@@ -1020,6 +1214,17 @@ cmd_set() {
     pid="$(running_pid "$state" || true)"
     if [[ -n ${pid:-} ]]; then
       apply_controls "$(read_state)" || fail "VICE did not take the joystick change. Restart it from Power or Load, then try again."
+    fi
+    emit_status
+    return 0
+    ;;
+  windowMode)
+    [[ $value == fullscreen || $value == floating ]] || fail "windowMode must be fullscreen or floating"
+    state="$(/usr/bin/jq -c --arg v "$value" '.windowMode = $v' <<<"$state")"
+    write_state "$state"
+    pid="$(running_pid "$state" || true)"
+    if [[ -n ${pid:-} ]]; then
+      apply_window_mode "$value" || fail "VICE window could not be moved. Try Power, then try again."
     fi
     emit_status
     return 0

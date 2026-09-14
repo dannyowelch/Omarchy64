@@ -1,6 +1,6 @@
 # Omarchy64
 
-Launch [VICE](https://vice-emu.sourceforge.io/) from the Omarchy bar, load a C64 image, map a joystick, and play on a dedicated workspace.
+Launch [VICE](https://vice-emu.sourceforge.io/) from the Omarchy bar, load a C64 image, map a joystick, and play fullscreen on a dedicated workspace or in a floating window.
 
 The bar icon is a grayscale pixel-art **64**, colored with the bar foreground so it matches the other plugin glyphs.
 
@@ -24,7 +24,7 @@ Frodo and similar emulators are lighter, but they do not cover cartridges, tapes
 - **Reset** — soft-reset the running emulator (CPU reset, RAM kept)
 - PAL / NTSC toggle (restarts VICE with `-pal` or `-ntsc` if it is already running)
 - Map the first gamepad (or a keyboard keyset) to C64 control port **2** by default
-- Always opens on Hyprland workspace **64**
+- **Fullscreen** (default) opens on Hyprland workspace **64**; **Floating** keeps a centered window on the current workspace
 - Right-click the bar icon to run the last autostarted image; middle-click quits VICE
 
 ## Install
@@ -66,9 +66,9 @@ omarchy plugin enable io.github.dannyowelch.omarchy64 --section right
 - **Cartridge** to insert a `.crt` (stays inserted until you eject it)
 - **Load "*",8,1** to launch and RUN a `.prg`, `.crt`, or `.d64`
 - **LOAD TAPE** to autostart the `.t64` (VICE presses play for you)
-- PAL / NTSC, joystick, and port are under Controls
+- PAL / NTSC, joystick, port, and Fullscreen / Floating are under Controls
 
-Keyboard in the panel: `j` / `k` moves, `d` Drive 8, `t` Tape, `c` Cartridge, `l` Load, `a` LOAD TAPE, `b` Power, `p` Pause, `r` Reset, Esc closes.
+Keyboard in the panel: `j` / `k` moves, `d` Drive 8, `t` Tape, `c` Cartridge, `l` Load, `a` LOAD TAPE, `b` Power, `p` Pause, `r` Reset, `f` Fullscreen/Floating, Esc closes.
 
 While VICE is focused, a USB pad is the joystick (stick or D-pad, plus fire on the first buttons). Changing joystick or port in the panel applies immediately if VICE is already running. **Keyboard** is arrows plus Space.
 
@@ -91,6 +91,7 @@ CLI (same binary the panel runs):
 ~/.config/omarchy/plugins/io.github.dannyowelch.omarchy64/omarchy64-ctl launch ~/Games/C64/game.d64
 ~/.config/omarchy/plugins/io.github.dannyowelch.omarchy64/omarchy64-ctl launch-tape ~/Games/C64/game.t64
 ~/.config/omarchy/plugins/io.github.dannyowelch.omarchy64/omarchy64-ctl set video ntsc
+~/.config/omarchy/plugins/io.github.dannyowelch.omarchy64/omarchy64-ctl set windowMode floating
 ~/.config/omarchy/plugins/io.github.dannyowelch.omarchy64/omarchy64-ctl quit
 ```
 
@@ -98,7 +99,8 @@ CLI (same binary the panel runs):
 
 | Setting | Default | Notes |
 |---------|---------|--------|
-| Workspace | `64` | Dedicated Hyprland workspace |
+| Workspace | `64` | Fullscreen mode uses this dedicated Hyprland workspace |
+| Window | Fullscreen | Fullscreen opens on workspace 64; Floating stays on the current workspace. Live-applied while VICE is running. |
 | Joystick | Auto | First SDL pad (stick/hat + fire); otherwise arrows + Space. Live-applied while VICE is running. |
 | C64 port | 2 | Most games; Port 1 is the exception |
 | Video | PAL | NTSC uses `-ntsc`; switching while VICE is open restarts it |
