@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.dannyowelch.omarchy64",
   "name": "Omarchy64",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "author": "Danny Welch",
   "license": "MIT",
   "description": "Launch VICE C64 games from the Omarchy bar: load PRG, CRT, D64, or T64 images, map a joystick, and play fullscreen on workspace 64 or in a floating window.",
