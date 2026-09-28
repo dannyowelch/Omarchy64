@@ -21,7 +21,7 @@ MONITOR_PORT="6510"
 
 usage() {
   /usr/bin/cat <<USAGE
-Usage: omarchy64-ctl <status|launch|launch-tape|play-last|basic|power|pause|reset|drive8|eject|blank-disk|tape|eject-tape|blank-tape|tape-ctrl|cart|eject-cart|quit|browse|set|ensure-rules|install-emu> [arg]
+Usage: omarchy64-ctl <status|launch|launch-tape|play-last|basic|power|pause|reset|drive8|eject|blank-disk|tape|eject-tape|blank-tape|tape-ctrl|tape-where|cart|eject-cart|quit|browse|set|ensure-rules|install-emu> [arg]
 
 Launch VICE (x64sc / x64).
   launch [image]   RUN the disk in drive 8, or IMAGE if given
@@ -37,6 +37,7 @@ Launch VICE (x64sc / x64).
   eject-tape       Empty the tape drive
   blank-tape [image]  Create an empty .tap and insert it in the datasette
   tape-ctrl <play|record|stop|rewind>  Datasette key while VICE is running
+  tape-where       Read the datasette counter position while VICE is running
   cart [image]     Set/attach a .crt; does not start VICE
   eject-cart       Empty the cartridge slot
   browse [--disks|--tapes|--carts|--new-disk|--new-tape] File chooser starting in ~/Games/C64
@@ -315,7 +316,7 @@ apply_controls() {
 
 vice_monitor() {
   /usr/bin/python3 -I -S - "$MONITOR_HOST" "$MONITOR_PORT" "$@" <<'PY'
-import socket, sys, time
+import os, socket, sys, time
 
 host, port = sys.argv[1], int(sys.argv[2])
 cmds = sys.argv[3:]
@@ -391,7 +392,15 @@ low = text.lower()
 if "unknown command" in low or "unknown resource" in low:
     print(text.strip(), file=sys.stderr)
     sys.exit(1)
+if os.environ.get("OMARCHY64_MONITOR_ECHO") == "1":
+    sys.stdout.write(text)
+    if not text.endswith("\n"):
+        sys.stdout.write("\n")
 PY
+}
+
+monitor_text() {
+  OMARCHY64_MONITOR_ECHO=1 vice_monitor "$@"
 }
 
 vice_args() {
@@ -756,6 +765,7 @@ emit_status() {
     --argjson drive8Exists "$([[ $drive8_exists == true ]] && echo true || echo false)" \
     --arg tape "$tape" \
     --argjson tapeExists "$([[ $tape_exists == true ]] && echo true || echo false)" \
+    --argjson tapeCycles "${TAPE_CYCLES:-null}" \
     --arg cart "$cart" \
     --argjson cartExists "$([[ $cart_exists == true ]] && echo true || echo false)" \
     --arg lastMode "$(/usr/bin/jq -r '.lastMode' <<<"$state")" \
@@ -778,6 +788,7 @@ emit_status() {
       drive8Exists: $drive8Exists,
       tape: $tape,
       tapeExists: $tapeExists,
+      tapeCycles: $tapeCycles,
       cart: $cart,
       cartExists: $cartExists,
       lastMode: $lastMode,
@@ -968,7 +979,17 @@ cmd_reset() {
   pid="$(running_pid "$state" || true)"
   [[ -n ${pid:-} ]] || fail "VICE is not running"
   # Monitor: 0 = reset (soft / RESET line), 1 = power cycle.
-  vice_monitor "reset 0" || fail "VICE did not take the reset"
+  # DatasetteResetWithCPU defaults on, so this also rewinds the tape to 000.
+  local tape ext
+  tape="$(/usr/bin/jq -r '.tape // empty' <<<"$state")"
+  tape="${tape/#\~/$HOME}"
+  ext="${tape##*.}"
+  ext="${ext,,}"
+  if [[ -n $tape && -f $tape && $ext == tap ]]; then
+    monitor_with_tape_offset "$tape" "reset 0" || fail "VICE did not take the reset"
+  else
+    vice_monitor "reset 0" || fail "VICE did not take the reset"
+  fi
   emit_status
 }
 
@@ -1040,7 +1061,8 @@ cmd_tape() {
     if [[ ${image,,} == *.t64 ]]; then
       vice_monitor "resourceset TrapDevice1 1" "attach \"$(monitor_quote "$image")\" 1" || fail "VICE is running but the tape could not be attached. Try F12 → Tape."
     else
-      vice_monitor "attach \"$(monitor_quote "$image")\" 1" || fail "VICE is running but the tape could not be attached. Try F12 → Tape."
+      # Attaching rewinds the datasette, so the counter returns to the start.
+      monitor_with_tape_offset "$image" "attach \"$(monitor_quote "$image")\" 1" || fail "VICE is running but the tape could not be attached. Try F12 → Tape."
     fi
   fi
   emit_status
@@ -1236,6 +1258,81 @@ cmd_blank_tape() {
   cmd_tape "$image"
 }
 
+# Sum VICE's datasette cycle_counter (machine cycles / 8) up to a TAP payload
+# offset. tapeoffs reports that offset. A version-0 zero byte is a long gap of
+# DatasetteZeroGapDelay (default 2500 cycles). A later version stores that gap
+# in the next three bytes.
+tap_payload_cycles() {
+  local image="$1" offset="$2"
+  [[ $offset =~ ^[0-9]+$ ]] || return 1
+  [[ -f $image && ! -L $image ]] || return 1
+  /usr/bin/python3 -I -S - "$image" "$offset" <<'PY'
+import sys
+path, offset = sys.argv[1], int(sys.argv[2])
+if offset > 64 * 1024 * 1024:
+    offset = 64 * 1024 * 1024
+ZERO_UNITS = 2500 // 8
+with open(path, "rb") as fh:
+    header = fh.read(20)
+    if len(header) < 20 or header[:12] != b"C64-TAPE-RAW":
+        sys.exit(1)
+    version = header[12]
+    data = fh.read(offset) if offset else b""
+
+def payload_cycles(buf, version):
+    if version == 0:
+        return sum(buf) + buf.count(0) * ZERO_UNITS
+    total = 0
+    i = 0
+    n = len(buf)
+    while i < n:
+        z = buf.find(0, i)
+        if z < 0:
+            total += sum(buf[i:])
+            break
+        if z > i:
+            total += sum(buf[i:z])
+        if z + 3 >= n:
+            break
+        gap = buf[z + 1] | (buf[z + 2] << 8) | (buf[z + 3] << 16)
+        total += (gap // 8) if gap else ZERO_UNITS
+        i = z + 4
+    return total
+
+print(payload_cycles(data, version))
+PY
+}
+
+tape_cycles_from_reply() {
+  local image="$1" reply="$2" line="" offset=""
+  line="$(printf '%s\n' "$reply" | /usr/bin/grep -oE 'Current tape offset is: -?[0-9]+' | /usr/bin/tail -n 1 || true)"
+  offset="${line##* }"
+  [[ $offset =~ ^[0-9]+$ ]] || return 1
+  tap_payload_cycles "$image" "$offset"
+}
+
+adopt_tape_cycles() {
+  local image="$1" reply="$2" cycles=""
+  cycles="$(tape_cycles_from_reply "$image" "$reply" 2>/dev/null || true)"
+  if [[ $cycles =~ ^[0-9]+$ ]]; then
+    TAPE_CYCLES="$cycles"
+  fi
+}
+
+# tapeoffs rides along in a monitor session the caller already needs. A second
+# connection would freeze the emulator again. If this VICE has no tapeoffs,
+# the datasette command still runs on its own.
+monitor_with_tape_offset() {
+  local image="$1"
+  shift
+  local reply=""
+  if reply="$(monitor_text "$@" tapeoffs 2>/dev/null)"; then
+    adopt_tape_cycles "$image" "$reply"
+    return 0
+  fi
+  vice_monitor "$@"
+}
+
 # tapectrl is the monitor command for the datasette keys. 0-4 are the same
 # in the monitor's default hex radix and in decimal. Record (4) closes the
 # play switch as well as the record key.
@@ -1276,7 +1373,33 @@ cmd_tape_ctrl() {
   # Play, Record, Stop, and Rewind leave the emulator at normal speed so
   # a manual load or save takes as long as a real datasette. LOAD TAPE
   # still passes -autostart-warp.
-  vice_monitor "${cmds[@]}" || fail "VICE did not take the tape control"
+  if [[ $ext == tap ]]; then
+    monitor_with_tape_offset "$tape" "${cmds[@]}" || fail "VICE did not take the tape control"
+  else
+    vice_monitor "${cmds[@]}" || fail "VICE did not take the tape control"
+  fi
+  emit_status
+}
+
+# One reading for the panel. The remote monitor freezes emulation while it is
+# connected, so the counter is not polled while the tape is moving.
+cmd_tape_where() {
+  local state pid tape ext reply=""
+  state="$(read_state)"
+  pid="$(running_pid "$state" || true)"
+  if [[ -z ${pid:-} ]]; then
+    emit_status
+    return
+  fi
+  tape="$(/usr/bin/jq -r '.tape // empty' <<<"$state")"
+  tape="${tape/#\~/$HOME}"
+  ext="${tape##*.}"
+  ext="${ext,,}"
+  if [[ -n $tape && -f $tape && $ext == tap ]]; then
+    if reply="$(monitor_text tapeoffs 2>/dev/null)"; then
+      adopt_tape_cycles "$tape" "$reply"
+    fi
+  fi
   emit_status
 }
 
@@ -1562,6 +1685,7 @@ tape) cmd_tape "${1:-}" ;;
 eject-tape) cmd_eject_tape ;;
 blank-tape) cmd_blank_tape "${1:-}" ;;
 tape-ctrl) cmd_tape_ctrl "${1:-}" ;;
+tape-where) cmd_tape_where ;;
 cart) cmd_cart "${1:-}" ;;
 eject-cart) cmd_eject_cart ;;
 quit) quit_emu; emit_status ;;

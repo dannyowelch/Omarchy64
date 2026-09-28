@@ -13,6 +13,7 @@ function emptyStatus() {
     drive8Exists: false,
     tape: "",
     tapeExists: false,
+    tapeCycles: null,
     cart: "",
     cartExists: false,
     lastMode: "",
@@ -52,6 +53,7 @@ function parseStatus(raw) {
     status.drive8Exists = parsed.drive8Exists === true
     status.tape = parsed.tape || ""
     status.tapeExists = parsed.tapeExists === true
+    status.tapeCycles = (typeof parsed.tapeCycles === "number" && isFinite(parsed.tapeCycles) && parsed.tapeCycles >= 0) ? parsed.tapeCycles : null
     status.cart = parsed.cart || ""
     status.cartExists = parsed.cartExists === true
     status.lastMode = parsed.lastMode || ""
@@ -172,6 +174,60 @@ function tapeLabel(status) {
 
 function isTap(path) {
   return /\.tap$/i.test(String(path || ""))
+}
+
+// VICE datasette counter: c = g*(sqrt(v*t/(d*pi) + r^2/d^2) - r/d), shown as 3 digits.
+// cycle units are machine cycles / 8, the same unit datasette.c stores in cycle_counter.
+var TAPE_DS_D = 1.27e-5
+var TAPE_DS_R = 1.07e-2
+var TAPE_DS_V_PLAY = 4.76e-2
+var TAPE_DS_G = 0.525
+var TAPE_DS_C1 = TAPE_DS_V_PLAY / TAPE_DS_D / Math.PI
+var TAPE_DS_C2 = (TAPE_DS_R * TAPE_DS_R) / (TAPE_DS_D * TAPE_DS_D)
+var TAPE_DS_C3 = TAPE_DS_R / TAPE_DS_D
+var TAPE_REWIND_PER_SEC = 4
+
+function tapeMachineCycles(video) {
+  return video === "ntsc" ? 1022730 : 985248
+}
+
+function tapeRawCounter(cycles, video) {
+  var cc = Number(cycles)
+  if (!isFinite(cc) || cc <= 0) return 0
+  var inside = cc / (tapeMachineCycles(video) / 8) * TAPE_DS_C1 + TAPE_DS_C2
+  if (inside < 0) inside = 0
+  var raw = Math.trunc(TAPE_DS_G * (Math.sqrt(inside) - TAPE_DS_C3))
+  return raw > 0 ? raw : 0
+}
+
+function tapeCyclesForRaw(raw, video) {
+  if (!(raw > 0)) return 0
+  var inner = raw / TAPE_DS_G + TAPE_DS_C3
+  var cc = (inner * inner - TAPE_DS_C2) * (tapeMachineCycles(video) / 8) / TAPE_DS_C1
+  if (!isFinite(cc) || cc < 0) return 0
+  return cc
+}
+
+function advanceTapeCycles(cycles, seconds, motion, video) {
+  var cc = Number(cycles)
+  if (!isFinite(cc) || cc < 0) cc = 0
+  var dt = Number(seconds)
+  if (!isFinite(dt) || dt <= 0 || motion === "stop") return cc
+  if (motion === "play" || motion === "record")
+    return cc + (tapeMachineCycles(video) / 8) * dt
+  if (motion === "rewind") {
+    var next = tapeRawCounter(cc, video) - TAPE_REWIND_PER_SEC * dt
+    if (next <= 0) return 0
+    return tapeCyclesForRaw(next, video)
+  }
+  return cc
+}
+
+function formatTapeCounter(cycles, seconds, motion, video) {
+  var n = tapeRawCounter(advanceTapeCycles(cycles, seconds, motion, video), video) % 1000
+  var text = String(n)
+  while (text.length < 3) text = "0" + text
+  return text
 }
 
 function cartLabel(status) {

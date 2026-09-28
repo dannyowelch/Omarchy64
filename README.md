@@ -67,7 +67,7 @@ omarchy plugin enable io.github.dannyowelch.omarchy64 --section right
 - **Blank** next to Drive 8 to create a formatted disk and insert it
 - **Tape** to put a `.tap` or `.t64` in the datasette
 - **Blank** next to Tape to create an empty `.tap` and insert it
-- **Play**, **Record**, **Stop**, and **Rewind** control the datasette while VICE is running. Record latches on and presses Play; press it again to release. A `.tap` is a real tape and can store a new program; Play and Record run at normal tape speed. A `.t64` only loads
+- **Play**, **Record**, **Stop**, and **Rewind** control the datasette while VICE is running. Record latches on and presses Play; press it again to release. A `.tap` is a real tape and can store a new program; Play and Record run at normal tape speed. The counter under the tape name follows a `.tap` and returns to 000 when Reset rewinds the tape. A `.t64` only loads
 - **Cartridge** to insert a `.crt` (stays inserted until you eject it)
 - **Load "*",8,1** to launch and RUN a `.prg`, `.crt`, or `.d64`
 - **LOAD TAPE** to autostart the `.tap` or `.t64` at warp (VICE presses play for you)

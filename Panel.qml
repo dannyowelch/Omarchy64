@@ -25,6 +25,11 @@ Panel {
   property string browseThen: "launch"
   property bool tapePlayDown: false
   property bool tapeRecordArmed: false
+  property double tapeCycles: 0
+  property string tapeMotion: "stop"
+  property double tapeAnchorMs: 0
+  property int tapeTick: 0
+  property bool tapeWherePending: false
 
   readonly property string pluginDir: {
     var s = String(Qt.resolvedUrl("."))
@@ -84,11 +89,22 @@ Panel {
     if (text.length > root.ctlOutputCap) return
     var next = Model.parseStatus(text)
     var playing = next.running && next.running.active
-    if (!playing || next.tape !== root.status.tape) {
+    var nextPid = next.running ? (next.running.pid || 0) : 0
+    var oldPid = root.status.running ? (root.status.running.pid || 0) : 0
+    if (!playing || next.tape !== root.status.tape || nextPid !== oldPid) {
       root.tapePlayDown = false
       root.tapeRecordArmed = false
+      root.tapeMotion = "stop"
+      root.tapeCycles = 0
+      root.tapeAnchorMs = Date.now()
+    }
+    if (typeof next.tapeCycles === "number") {
+      root.tapeCycles = next.tapeCycles
+      root.tapeAnchorMs = Date.now()
+      root.tapeWherePending = false
     }
     root.status = next
+    if (root.tapeWherePending) root.maybeSyncTapeCounter()
     if (root.selectedIndex > root.items.length - 1)
       root.selectedIndex = Model.clampIndex(root.selectedIndex, root.items.length)
   }
@@ -210,7 +226,46 @@ Panel {
 
   function resetEmu() {
     if (!root.isPlaying) return
+    root.tapePlayDown = false
+    root.tapeRecordArmed = false
+    root.noteTapeMotion("stop")
     runCtl(["reset"])
+  }
+
+  function tapeElapsedSeconds() {
+    if (!(root.tapeAnchorMs > 0) || root.isPaused || root.tapeMotion === "stop") return 0
+    return Math.max(0, (Date.now() - root.tapeAnchorMs) / 1000)
+  }
+
+  function noteTapeMotion(motion) {
+    root.tapeCycles = Model.advanceTapeCycles(root.tapeCycles, root.tapeElapsedSeconds(), root.tapeMotion, root.status.video)
+    root.tapeAnchorMs = Date.now()
+    root.tapeMotion = motion
+    root.tapeTick = root.tapeTick + 1
+  }
+
+  function tapeCounterLabel() {
+    if (root.tapeTick < 0) return "000"
+    if (!Model.isTap(root.status.tape)) return "---"
+    if (!root.isPlaying) return "000"
+    return Model.formatTapeCounter(root.tapeCycles, root.tapeElapsedSeconds(), root.tapeMotion, root.status.video)
+  }
+
+  // The remote monitor freezes VICE while connected, so this runs once when
+  // the panel opens rather than on a timer. Play, Stop, Rewind, and Reset
+  // read the position in the monitor session they already open.
+  function syncTapeCounter() {
+    if (!root.isPlaying || !Model.isTap(root.status.tape)) return
+    if (root.busy || actionProc.running || counterProc.running) return
+    counterProc.command = root.ctlCommand(["tape-where"], root.ctlOutputCap, root.ctlErrorCap, root.statusDeadlineMs)
+    counterProc.running = true
+  }
+
+  function maybeSyncTapeCounter() {
+    if (!root.tapeWherePending || !root.opened) return
+    if (root.busy || actionProc.running || counterProc.running) return
+    root.tapeWherePending = false
+    root.syncTapeCounter()
   }
 
   function togglePause() {
@@ -291,23 +346,27 @@ Panel {
       if (root.tapeRecordArmed) {
         root.tapeRecordArmed = false
         root.tapePlayDown = false
+        root.noteTapeMotion("stop")
         runCtl(["tape-ctrl", "stop"])
       } else {
         // Record holds the record key down and presses Play.
         root.tapeRecordArmed = true
         root.tapePlayDown = true
+        root.noteTapeMotion("play")
         runCtl(["tape-ctrl", "record"])
       }
       return
     }
     if (action === "play") {
       root.tapePlayDown = true
+      root.noteTapeMotion("play")
       if (root.tapeRecordArmed) runCtl(["tape-ctrl", "record"])
       else runCtl(["tape-ctrl", "play"])
       return
     }
     root.tapePlayDown = false
     root.tapeRecordArmed = false
+    root.noteTapeMotion(action === "rewind" ? "rewind" : "stop")
     runCtl(["tape-ctrl", action])
   }
 
@@ -408,14 +467,26 @@ Panel {
     root.terminateProc(actionProc, "plugin unloading")
     root.terminateProc(browseProc, "plugin unloading")
     root.terminateProc(ensureProc, "plugin unloading")
+    root.terminateProc(counterProc, "plugin unloading")
   }
 
   onOpenedChanged: {
     if (opened) {
+      root.tapeWherePending = true
       refresh()
       cursorActive = false
       selectedIndex = 0
     }
+  }
+
+  onIsPausedChanged: {
+    if (!(root.tapeAnchorMs > 0)) return
+    if (root.isPaused) {
+      var seconds = Math.max(0, (Date.now() - root.tapeAnchorMs) / 1000)
+      root.tapeCycles = Model.advanceTapeCycles(root.tapeCycles, seconds, root.tapeMotion, root.status.video)
+    }
+    root.tapeAnchorMs = Date.now()
+    root.tapeTick = root.tapeTick + 1
   }
 
   Timer {
@@ -423,6 +494,13 @@ Panel {
     running: root.opened || root.isPlaying
     repeat: true
     onTriggered: if (!root.busy && !statusProc.running) root.refresh()
+  }
+
+  Timer {
+    interval: 200
+    repeat: true
+    running: root.opened && root.isPlaying && root.tapeMotion !== "stop" && !root.isPaused
+    onTriggered: root.tapeTick = root.tapeTick + 1
   }
 
   Timer {
@@ -436,14 +514,15 @@ Panel {
     id: procWatchdog
     interval: 250
     repeat: true
-    running: statusProc.running || actionProc.running || browseProc.running || ensureProc.running ||
-             statusProc.killAt > 0 || actionProc.killAt > 0 || browseProc.killAt > 0 || ensureProc.killAt > 0
+    running: statusProc.running || actionProc.running || browseProc.running || ensureProc.running || counterProc.running ||
+             statusProc.killAt > 0 || actionProc.killAt > 0 || browseProc.killAt > 0 || ensureProc.killAt > 0 || counterProc.killAt > 0
     onTriggered: {
       var now = Date.now()
       root.checkDeadline(statusProc, root.statusDeadlineMs, now)
       root.checkDeadline(actionProc, root.actionDeadlineMs, now)
       root.checkDeadline(browseProc, root.browseDeadlineMs, now)
       root.checkDeadline(ensureProc, root.ensureDeadlineMs, now)
+      root.checkDeadline(counterProc, root.statusDeadlineMs, now)
     }
   }
 
@@ -503,6 +582,38 @@ Panel {
       onRead: function(data) { root.onProcChunk(ensureProc, data, true) }
     }
     onStarted: root.armProc(ensureProc)
+  }
+
+  Process {
+    id: counterProc
+    property bool aborting: false
+    property string abortReason: ""
+    property double startedAt: 0
+    property double killAt: 0
+    property string outAcc: ""
+    property string errAcc: ""
+    property int outBytes: 0
+    property int errBytes: 0
+    property int outCap: root.ctlOutputCap
+    property int errCap: root.ctlErrorCap
+    property var leaderPid: 0
+    clearEnvironment: true
+    environment: root.ctlEnv
+    command: root.ctlCommand(["tape-where"], root.ctlOutputCap, root.ctlErrorCap, root.statusDeadlineMs)
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(data) { root.onProcChunk(counterProc, data, false) }
+    }
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function(data) { root.onProcChunk(counterProc, data, true) }
+    }
+    onStarted: root.armProc(counterProc)
+    onExited: {
+      if (counterProc.aborting) return
+      var raw = String(counterProc.outAcc || "").trim()
+      if (raw.charAt(0) === "{") root.ingest(raw)
+    }
   }
 
   Process {
@@ -933,6 +1044,31 @@ Panel {
             }
 
             Row {
+              visible: root.status.tape !== ""
+              width: parent.width
+              spacing: Style.space(8)
+
+              Text {
+                width: parent.width - tapeCounterText.implicitWidth - parent.spacing
+                text: "Counter"
+                color: root.contentDim
+                font.family: root.contentFontFamily
+                font.pixelSize: Style.font.caption
+                verticalAlignment: Text.AlignVCenter
+              }
+
+              Text {
+                id: tapeCounterText
+                text: root.tapeCounterLabel()
+                color: root.contentForeground
+                font.family: "monospace"
+                font.pixelSize: Style.font.caption
+                font.letterSpacing: 1
+                verticalAlignment: Text.AlignVCenter
+              }
+            }
+
+            Row {
               width: parent.width
               spacing: Style.space(8)
 
@@ -996,7 +1132,7 @@ Panel {
               textFormat: Text.PlainText
               width: parent.width
               wrapMode: Text.WordWrap
-              text: "Record latches on and presses Play. Press it again to release. Blank creates a .tap, which can store a new program. Play and Record run at normal tape speed. A .t64 only loads. Stop releases the keys. LOAD TAPE still uses warp."
+              text: "Record latches on and presses Play. Press it again to release. Blank creates a .tap, which can store a new program. Play and Record run at normal tape speed. The counter follows a .tap and returns to 000 when Reset rewinds the tape. A .t64 only loads. Stop releases the keys. LOAD TAPE still uses warp."
               color: root.contentDim
               font.family: root.contentFontFamily
               font.pixelSize: Style.font.caption
