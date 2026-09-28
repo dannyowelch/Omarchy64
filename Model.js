@@ -249,8 +249,8 @@ function cursorItems(status) {
   items.push({ kind: "blankTape" })
   if (status.tape) items.push({ kind: "ejectTape" })
   if (status.running && status.running.active && status.tape) {
-    items.push({ kind: "tapePlay" })
     if (isTap(status.tape)) items.push({ kind: "tapeRecord" })
+    items.push({ kind: "tapePlay" })
     items.push({ kind: "tapeStop" })
     items.push({ kind: "tapeRewind" })
   }

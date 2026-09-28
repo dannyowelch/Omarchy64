@@ -1073,7 +1073,20 @@ Panel {
               spacing: Style.space(8)
 
               Button {
-                width: (parent.width - parent.spacing) / 2
+                width: (parent.width - parent.spacing * 3) / 4
+                text: "Record"
+                bordered: true
+                active: root.tapeRecordArmed
+                hasCursor: root.hasCursorKind("tapeRecord")
+                foreground: root.contentForeground
+                fontFamily: root.contentFontFamily
+                enabled: root.tapeDeckReady && Model.isTap(root.status.tape)
+                onHovered: function(h) { if (h) root.focusKind("tapeRecord") }
+                onClicked: root.tapeControl("record")
+              }
+
+              Button {
+                width: (parent.width - parent.spacing * 3) / 4
                 text: "Play"
                 bordered: true
                 active: root.tapePlayDown
@@ -1086,25 +1099,7 @@ Panel {
               }
 
               Button {
-                width: (parent.width - parent.spacing) / 2
-                text: "Record"
-                bordered: true
-                active: root.tapeRecordArmed
-                hasCursor: root.hasCursorKind("tapeRecord")
-                foreground: root.contentForeground
-                fontFamily: root.contentFontFamily
-                enabled: root.tapeDeckReady && Model.isTap(root.status.tape)
-                onHovered: function(h) { if (h) root.focusKind("tapeRecord") }
-                onClicked: root.tapeControl("record")
-              }
-            }
-
-            Row {
-              width: parent.width
-              spacing: Style.space(8)
-
-              Button {
-                width: (parent.width - parent.spacing) / 2
+                width: (parent.width - parent.spacing * 3) / 4
                 text: "Stop"
                 bordered: true
                 hasCursor: root.hasCursorKind("tapeStop")
@@ -1116,7 +1111,7 @@ Panel {
               }
 
               Button {
-                width: (parent.width - parent.spacing) / 2
+                width: (parent.width - parent.spacing * 3) / 4
                 text: "Rewind"
                 bordered: true
                 hasCursor: root.hasCursorKind("tapeRewind")
