@@ -14,11 +14,13 @@ Frodo and similar emulators are lighter, but they do not cover cartridges, tapes
 
 - Bar button with a grayscale **64**; click opens the panel
 - **Drive 8** — choose a disk; attaches it if VICE is already open, otherwise just remembers it
-- **Tape** — choose a `.t64`; attaches it if VICE is already open, otherwise just remembers it
+- **Tape** — choose a `.tap` or `.t64`; attaches it if VICE is already open, otherwise just remembers it
+- **Blank** — between Drive 8 and Eject, and between Tape and Eject. A save dialog names a new formatted disk or empty `.tap`, then inserts it
+- **Play / Record / Stop / Rewind** — datasette keys while VICE is running, sent with the monitor command `tapectrl`
 - **Cartridge** — choose a `.crt`; attaches it if VICE is already open, otherwise just remembers it
 - **Eject** — empty drive 8, the tape drive, or the cartridge slot
 - **Load "*",8,1** — RUN the disk in drive 8 (file chooser if the drive is empty)
-- **LOAD TAPE** — autostart the `.t64` in the datasette (file chooser if the tape drive is empty)
+- **LOAD TAPE** — autostart the `.tap` or `.t64` in the datasette (file chooser if the tape drive is empty)
 - **Power** — start VICE if it is off, quit if it is on; disk, tape, and cartridge stay inserted
 - **Pause** — toggle VICE pause (same as Alt+P in the emulator)
 - **Reset** — soft-reset the running emulator (CPU reset, RAM kept)
@@ -62,10 +64,13 @@ omarchy plugin enable io.github.dannyowelch.omarchy64 --section right
 - **Pause** to freeze or resume the running emulator
 - **Reset** for a soft reset while VICE is running
 - **Drive 8** to put a `.d64` in the drive (type `LOAD "*",8,1` yourself)
-- **Tape** to put a `.t64` in the datasette
+- **Blank** next to Drive 8 to create a formatted disk and insert it
+- **Tape** to put a `.tap` or `.t64` in the datasette
+- **Blank** next to Tape to create an empty `.tap` and insert it
+- **Play**, **Record**, **Stop**, and **Rewind** control the datasette while VICE is running. Record latches on and presses Play; press it again to release. A `.tap` is a real tape and can store a new program; Play and Record run at normal tape speed. A `.t64` only loads
 - **Cartridge** to insert a `.crt` (stays inserted until you eject it)
 - **Load "*",8,1** to launch and RUN a `.prg`, `.crt`, or `.d64`
-- **LOAD TAPE** to autostart the `.t64` (VICE presses play for you)
+- **LOAD TAPE** to autostart the `.tap` or `.t64` at warp (VICE presses play for you)
 - PAL / NTSC, joystick, port, and Fullscreen / Floating are under Controls
 
 Keyboard in the panel: `j` / `k` moves, `d` Drive 8, `t` Tape, `c` Cartridge, `l` Load, `a` LOAD TAPE, `b` Power, `p` Pause, `r` Reset, `f` Fullscreen/Floating, Esc closes.
@@ -86,7 +91,10 @@ CLI (same binary the panel runs):
 ~/.config/omarchy/plugins/io.github.dannyowelch.omarchy64/omarchy64-ctl pause
 ~/.config/omarchy/plugins/io.github.dannyowelch.omarchy64/omarchy64-ctl reset
 ~/.config/omarchy/plugins/io.github.dannyowelch.omarchy64/omarchy64-ctl drive8 ~/Games/C64/game.d64
+~/.config/omarchy/plugins/io.github.dannyowelch.omarchy64/omarchy64-ctl blank-disk ~/Games/C64/blank.d64
 ~/.config/omarchy/plugins/io.github.dannyowelch.omarchy64/omarchy64-ctl tape ~/Games/C64/game.t64
+~/.config/omarchy/plugins/io.github.dannyowelch.omarchy64/omarchy64-ctl blank-tape ~/Games/C64/blank.tap
+~/.config/omarchy/plugins/io.github.dannyowelch.omarchy64/omarchy64-ctl tape-ctrl play
 ~/.config/omarchy/plugins/io.github.dannyowelch.omarchy64/omarchy64-ctl cart ~/Games/C64/game.crt
 ~/.config/omarchy/plugins/io.github.dannyowelch.omarchy64/omarchy64-ctl launch ~/Games/C64/game.d64
 ~/.config/omarchy/plugins/io.github.dannyowelch.omarchy64/omarchy64-ctl launch-tape ~/Games/C64/game.t64
@@ -104,7 +112,7 @@ CLI (same binary the panel runs):
 | Joystick | Auto | First SDL pad (stick/hat + fire); otherwise arrows + Space. Live-applied while VICE is running. |
 | C64 port | 2 | Most games; Port 1 is the exception |
 | Video | PAL | NTSC uses `-ntsc`; switching while VICE is open restarts it |
-| Warp load | on | `-autostart-warp` on **Load "*",8,1** only |
+| Warp load | on | `-autostart-warp` on **Load "*",8,1** and **LOAD TAPE**. Datasette Play and Record stay at normal speed |
 
 State lives in `~/.local/state/omarchy/omarchy64.json`. A Hyprland toggle at `~/.local/state/omarchy/toggles/hypr/omarchy64.lua` keeps the VICE window opaque and inhibits idle while it is focused.
 

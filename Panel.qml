@@ -23,6 +23,8 @@ Panel {
   property int selectedIndex: 0
   property bool cursorActive: false
   property string browseThen: "launch"
+  property bool tapePlayDown: false
+  property bool tapeRecordArmed: false
 
   readonly property string pluginDir: {
     var s = String(Qt.resolvedUrl("."))
@@ -38,6 +40,7 @@ Panel {
   readonly property bool emulatorFound: status.emulator && status.emulator.found
   readonly property bool isPlaying: status.running && status.running.active
   readonly property bool isPaused: root.isPlaying && status.running.paused === true
+  readonly property bool tapeDeckReady: !busy && isPlaying && status.tape !== "" && !browseProc.running
   readonly property bool dropdownOpen: joystickBox.popupOpen === true
   readonly property int ctlOutputCap: 65536
   readonly property int ctlErrorCap: 4096
@@ -79,7 +82,13 @@ Panel {
   function ingest(raw) {
     var text = String(raw || "")
     if (text.length > root.ctlOutputCap) return
-    root.status = Model.parseStatus(text)
+    var next = Model.parseStatus(text)
+    var playing = next.running && next.running.active
+    if (!playing || next.tape !== root.status.tape) {
+      root.tapePlayDown = false
+      root.tapeRecordArmed = false
+    }
+    root.status = next
     if (root.selectedIndex > root.items.length - 1)
       root.selectedIndex = Model.clampIndex(root.selectedIndex, root.items.length)
   }
@@ -259,6 +268,49 @@ Panel {
     browseFor("tape")
   }
 
+  function blankDrive8() {
+    if (!root.emulatorFound) {
+      runCtl(["install-emu"])
+      return
+    }
+    browseFor("blankDisk")
+  }
+
+  function blankTape() {
+    if (!root.emulatorFound) {
+      runCtl(["install-emu"])
+      return
+    }
+    browseFor("blankTape")
+  }
+
+  function tapeControl(action) {
+    if (!root.tapeDeckReady) return
+    if (action === "record") {
+      if (!Model.isTap(root.status.tape)) return
+      if (root.tapeRecordArmed) {
+        root.tapeRecordArmed = false
+        root.tapePlayDown = false
+        runCtl(["tape-ctrl", "stop"])
+      } else {
+        // Record holds the record key down and presses Play.
+        root.tapeRecordArmed = true
+        root.tapePlayDown = true
+        runCtl(["tape-ctrl", "record"])
+      }
+      return
+    }
+    if (action === "play") {
+      root.tapePlayDown = true
+      if (root.tapeRecordArmed) runCtl(["tape-ctrl", "record"])
+      else runCtl(["tape-ctrl", "play"])
+      return
+    }
+    root.tapePlayDown = false
+    root.tapeRecordArmed = false
+    runCtl(["tape-ctrl", action])
+  }
+
   function ejectCart() {
     if (!root.status.cart) return
     runCtl(["eject-cart"])
@@ -282,7 +334,9 @@ Panel {
     root.browseThen = mode
     root.pendingReopen = false
     if (mode === "drive8") browseProc.command = root.ctlCommand(["browse", "--disks"], root.browseOutputCap, root.ctlErrorCap, root.browseDeadlineMs)
+    else if (mode === "blankDisk") browseProc.command = root.ctlCommand(["browse", "--new-disk"], root.browseOutputCap, root.ctlErrorCap, root.browseDeadlineMs)
     else if (mode === "tape" || mode === "launchTape") browseProc.command = root.ctlCommand(["browse", "--tapes"], root.browseOutputCap, root.ctlErrorCap, root.browseDeadlineMs)
+    else if (mode === "blankTape") browseProc.command = root.ctlCommand(["browse", "--new-tape"], root.browseOutputCap, root.ctlErrorCap, root.browseDeadlineMs)
     else if (mode === "cart") browseProc.command = root.ctlCommand(["browse", "--carts"], root.browseOutputCap, root.ctlErrorCap, root.browseDeadlineMs)
     else browseProc.command = root.ctlCommand(["browse"], root.browseOutputCap, root.ctlErrorCap, root.browseDeadlineMs)
     // The panel is a layer-shell overlay, so zenity cannot stack above it.
@@ -315,9 +369,15 @@ Panel {
     if (!cursorActive) return
     var kind = itemKind(selectedIndex)
     if (kind === "drive8") attachDrive8()
+    else if (kind === "blankDisk") blankDrive8()
     else if (kind === "eject") ejectDrive8()
     else if (kind === "tape") attachTape()
+    else if (kind === "blankTape") blankTape()
     else if (kind === "ejectTape") ejectTape()
+    else if (kind === "tapePlay") tapeControl("play")
+    else if (kind === "tapeRecord") tapeControl("record")
+    else if (kind === "tapeStop") tapeControl("stop")
+    else if (kind === "tapeRewind") tapeControl("rewind")
     else if (kind === "cart") attachCart()
     else if (kind === "ejectCart") ejectCart()
     else if (kind === "play") loadAndRun()
@@ -528,9 +588,15 @@ Panel {
       if (root.browseThen === "drive8") {
         root.pendingReopen = !root.isPlaying
         root.runCtl(["drive8", path])
+      } else if (root.browseThen === "blankDisk") {
+        root.pendingReopen = !root.isPlaying
+        root.runCtl(["blank-disk", path])
       } else if (root.browseThen === "tape") {
         root.pendingReopen = !root.isPlaying
         root.runCtl(["tape", path])
+      } else if (root.browseThen === "blankTape") {
+        root.pendingReopen = !root.isPlaying
+        root.runCtl(["blank-tape", path])
       } else if (root.browseThen === "launchTape") {
         root.runCtl(["launch-tape", path], true)
       } else if (root.browseThen === "cart") {
@@ -587,12 +653,36 @@ Panel {
       root.ejectDrive8()
       return "ok"
     }
+    function blankDisk(): string {
+      root.blankDrive8()
+      return "ok"
+    }
     function tape(): string {
       root.attachTape()
       return "ok"
     }
     function ejectTape(): string {
       root.ejectTape()
+      return "ok"
+    }
+    function blankTape(): string {
+      root.blankTape()
+      return "ok"
+    }
+    function tapePlay(): string {
+      root.tapeControl("play")
+      return "ok"
+    }
+    function tapeRecord(): string {
+      root.tapeControl("record")
+      return "ok"
+    }
+    function tapeStop(): string {
+      root.tapeControl("stop")
+      return "ok"
+    }
+    function tapeRewind(): string {
+      root.tapeControl("rewind")
       return "ok"
     }
     function cart(): string {
@@ -745,7 +835,7 @@ Panel {
               spacing: Style.space(8)
 
               Button {
-                width: parent.width - ejectBtn.implicitWidth - parent.spacing
+                width: parent.width - blankDiskBtn.implicitWidth - ejectBtn.implicitWidth - parent.spacing * 2
                 text: "Drive 8"
                 bordered: true
                 hasCursor: root.hasCursorKind("drive8")
@@ -754,6 +844,18 @@ Panel {
                 enabled: !root.busy && !browseProc.running
                 onHovered: function(h) { if (h) root.focusKind("drive8") }
                 onClicked: root.attachDrive8()
+              }
+
+              Button {
+                id: blankDiskBtn
+                text: "Blank"
+                bordered: true
+                hasCursor: root.hasCursorKind("blankDisk")
+                foreground: root.contentForeground
+                fontFamily: root.contentFontFamily
+                enabled: !root.busy && !browseProc.running
+                onHovered: function(h) { if (h) root.focusKind("blankDisk") }
+                onClicked: root.blankDrive8()
               }
 
               Button {
@@ -784,7 +886,7 @@ Panel {
               spacing: Style.space(8)
 
               Button {
-                width: parent.width - ejectTapeBtn.implicitWidth - parent.spacing
+                width: parent.width - blankTapeBtn.implicitWidth - ejectTapeBtn.implicitWidth - parent.spacing * 2
                 text: "Tape"
                 bordered: true
                 hasCursor: root.hasCursorKind("tape")
@@ -793,6 +895,18 @@ Panel {
                 enabled: !root.busy && !browseProc.running
                 onHovered: function(h) { if (h) root.focusKind("tape") }
                 onClicked: root.attachTape()
+              }
+
+              Button {
+                id: blankTapeBtn
+                text: "Blank"
+                bordered: true
+                hasCursor: root.hasCursorKind("blankTape")
+                foreground: root.contentForeground
+                fontFamily: root.contentFontFamily
+                enabled: !root.busy && !browseProc.running
+                onHovered: function(h) { if (h) root.focusKind("blankTape") }
+                onClicked: root.blankTape()
               }
 
               Button {
@@ -816,6 +930,76 @@ Panel {
               font.family: root.contentFontFamily
               font.pixelSize: Style.font.caption
               elide: Text.ElideMiddle
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Button {
+                width: (parent.width - parent.spacing) / 2
+                text: "Play"
+                bordered: true
+                active: root.tapePlayDown
+                hasCursor: root.hasCursorKind("tapePlay")
+                foreground: root.contentForeground
+                fontFamily: root.contentFontFamily
+                enabled: root.tapeDeckReady
+                onHovered: function(h) { if (h) root.focusKind("tapePlay") }
+                onClicked: root.tapeControl("play")
+              }
+
+              Button {
+                width: (parent.width - parent.spacing) / 2
+                text: "Record"
+                bordered: true
+                active: root.tapeRecordArmed
+                hasCursor: root.hasCursorKind("tapeRecord")
+                foreground: root.contentForeground
+                fontFamily: root.contentFontFamily
+                enabled: root.tapeDeckReady && Model.isTap(root.status.tape)
+                onHovered: function(h) { if (h) root.focusKind("tapeRecord") }
+                onClicked: root.tapeControl("record")
+              }
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Button {
+                width: (parent.width - parent.spacing) / 2
+                text: "Stop"
+                bordered: true
+                hasCursor: root.hasCursorKind("tapeStop")
+                foreground: root.contentForeground
+                fontFamily: root.contentFontFamily
+                enabled: root.tapeDeckReady
+                onHovered: function(h) { if (h) root.focusKind("tapeStop") }
+                onClicked: root.tapeControl("stop")
+              }
+
+              Button {
+                width: (parent.width - parent.spacing) / 2
+                text: "Rewind"
+                bordered: true
+                hasCursor: root.hasCursorKind("tapeRewind")
+                foreground: root.contentForeground
+                fontFamily: root.contentFontFamily
+                enabled: root.tapeDeckReady
+                onHovered: function(h) { if (h) root.focusKind("tapeRewind") }
+                onClicked: root.tapeControl("rewind")
+              }
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              wrapMode: Text.WordWrap
+              text: "Record latches on and presses Play. Press it again to release. Blank creates a .tap, which can store a new program. Play and Record run at normal tape speed. A .t64 only loads. Stop releases the keys. LOAD TAPE still uses warp."
+              color: root.contentDim
+              font.family: root.contentFontFamily
+              font.pixelSize: Style.font.caption
             }
 
             Row {
@@ -1085,7 +1269,7 @@ Panel {
               textFormat: Text.PlainText
               width: parent.width
               wrapMode: Text.WordWrap
-              text: "Drive 8, Tape, and Cartridge stay inserted. Load runs a disk. LOAD TAPE autostarts the cassette. Power starts or stops VICE. Pause and Reset apply while it is running. Fullscreen uses workspace 64; Floating keeps a window on the current workspace. Pads use stick or D-pad plus fire; keyboard is arrows and Space."
+              text: "Drive 8, Tape, and Cartridge stay inserted. Blank creates a new disk or tape and inserts it. Load runs a disk. LOAD TAPE autostarts the cassette. Play, Record, Stop, and Rewind run the datasette while VICE is on. Power starts or stops VICE. Pause and Reset apply while it is running. Fullscreen uses workspace 64; Floating keeps a window on the current workspace. Pads use stick or D-pad plus fire; keyboard is arrows and Space."
               color: root.contentDim
               font.family: root.contentFontFamily
               font.pixelSize: Style.font.caption

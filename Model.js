@@ -159,7 +159,7 @@ function drive8Label(status) {
     var disk = prettyName(status.drive8)
     return status.drive8Exists === false ? (disk + " — missing") : disk
   }
-  return "Empty. Choose a disk; does not start VICE."
+  return "Empty. Choose a disk, or Blank to create one. Does not start VICE."
 }
 
 function tapeLabel(status) {
@@ -167,7 +167,11 @@ function tapeLabel(status) {
     var tape = prettyName(status.tape)
     return status.tapeExists === false ? (tape + " — missing") : tape
   }
-  return "Empty. Choose a tape; does not start VICE."
+  return "Empty. Choose a tape, or Blank to create one. Does not start VICE."
+}
+
+function isTap(path) {
+  return /\.tap$/i.test(String(path || ""))
 }
 
 function cartLabel(status) {
@@ -183,9 +187,17 @@ function cursorItems(status) {
   var found = status && status.emulator && status.emulator.found
   if (!found) return items
   items.push({ kind: "drive8" })
+  items.push({ kind: "blankDisk" })
   if (status.drive8) items.push({ kind: "eject" })
   items.push({ kind: "tape" })
+  items.push({ kind: "blankTape" })
   if (status.tape) items.push({ kind: "ejectTape" })
+  if (status.running && status.running.active && status.tape) {
+    items.push({ kind: "tapePlay" })
+    if (isTap(status.tape)) items.push({ kind: "tapeRecord" })
+    items.push({ kind: "tapeStop" })
+    items.push({ kind: "tapeRewind" })
+  }
   items.push({ kind: "cart" })
   if (status.cart) items.push({ kind: "ejectCart" })
   items.push({ kind: "play" })

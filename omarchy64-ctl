@@ -21,7 +21,7 @@ MONITOR_PORT="6510"
 
 usage() {
   /usr/bin/cat <<USAGE
-Usage: omarchy64-ctl <status|launch|launch-tape|play-last|basic|power|pause|reset|drive8|eject|tape|eject-tape|cart|eject-cart|quit|browse|set|ensure-rules|install-emu> [arg]
+Usage: omarchy64-ctl <status|launch|launch-tape|play-last|basic|power|pause|reset|drive8|eject|blank-disk|tape|eject-tape|blank-tape|tape-ctrl|cart|eject-cart|quit|browse|set|ensure-rules|install-emu> [arg]
 
 Launch VICE (x64sc / x64).
   launch [image]   RUN the disk in drive 8, or IMAGE if given
@@ -32,11 +32,14 @@ Launch VICE (x64sc / x64).
   reset            Soft-reset the running emulator (CPU reset)
   drive8 [image]   Set/attach a disk; does not start VICE
   eject            Empty drive 8
-  tape [image]     Set/attach a .t64; does not start VICE
+  blank-disk [image]  Create a formatted disk and insert it in drive 8
+  tape [image]     Set/attach a .tap or .t64; does not start VICE
   eject-tape       Empty the tape drive
+  blank-tape [image]  Create an empty .tap and insert it in the datasette
+  tape-ctrl <play|record|stop|rewind>  Datasette key while VICE is running
   cart [image]     Set/attach a .crt; does not start VICE
   eject-cart       Empty the cartridge slot
-  browse [--disks|--tapes|--carts] File chooser starting in ~/Games/C64
+  browse [--disks|--tapes|--carts|--new-disk|--new-tape] File chooser starting in ~/Games/C64
 USAGE
 }
 
@@ -464,6 +467,12 @@ vice_args() {
     fi
     if [[ -n $tape && -f $tape ]]; then
       args+=("-1" "$tape")
+      # A .t64 is a file list, not a pulse tape. LOAD only finishes when
+      # the tape trap is installed; VICE leaves TrapDevice1 off by default,
+      # and the kernal then sits on a blue screen waiting for pulses.
+      if [[ ${tape,,} == *.t64 ]]; then
+        args+=("-trapdevice1")
+      fi
     fi
     ;;
   *) fail "unknown launch mode: $mode" ;;
@@ -933,7 +942,7 @@ cmd_launch_tape() {
   [[ -n $image ]] || fail "no tape in the datasette"
   image="${image/#\~/$HOME}"
   [[ -f $image ]] || fail "image not found: $image"
-  is_tape_image "$image" || fail "LOAD TAPE needs a .t64 image"
+  is_tape_image "$image" || fail "LOAD TAPE needs a .tap or .t64 image"
   start_vice autostart "$image"
 }
 
@@ -1019,7 +1028,7 @@ cmd_tape() {
   [[ -n $image ]] || fail "no tape"
   image="${image/#\~/$HOME}"
   [[ -f $image ]] || fail "image not found: $image"
-  is_tape_image "$image" || fail "Tape needs a .t64 image"
+  is_tape_image "$image" || fail "Tape needs a .tap or .t64 image"
   image="$(/usr/bin/realpath -e "$image")"
 
   local state
@@ -1028,7 +1037,11 @@ cmd_tape() {
   state="$(read_state)"
   pid="$(running_pid "$state" || true)"
   if [[ -n ${pid:-} ]]; then
-    vice_monitor "attach \"$(monitor_quote "$image")\" 1" || fail "VICE is running but the tape could not be attached. Try F12 → Tape."
+    if [[ ${image,,} == *.t64 ]]; then
+      vice_monitor "resourceset TrapDevice1 1" "attach \"$(monitor_quote "$image")\" 1" || fail "VICE is running but the tape could not be attached. Try F12 → Tape."
+    else
+      vice_monitor "attach \"$(monitor_quote "$image")\" 1" || fail "VICE is running but the tape could not be attached. Try F12 → Tape."
+    fi
   fi
   emit_status
 }
@@ -1041,6 +1054,229 @@ cmd_eject_tape() {
     vice_monitor "detach 1" || true
   fi
   write_state "$(/usr/bin/jq -c '.tape = ""' <<<"$state")"
+  emit_status
+}
+
+# Letters, digits, and spaces. Disk names are 16 characters.
+media_label() {
+  local base stem label
+  base="$(/usr/bin/basename -- "$1")"
+  stem="${base%.*}"
+  label="$(printf '%s' "$stem" | /usr/bin/tr '[:lower:]' '[:upper:]' | /usr/bin/tr -c 'A-Z0-9' ' ' | /usr/bin/tr -s ' ' | /usr/bin/sed -e 's/^ *//' -e 's/ *$//')"
+  label="${label:0:$2}"
+  label="$(printf '%s' "$label" | /usr/bin/sed -e 's/ *$//')"
+  [[ -n $label ]] || label="BLANK"
+  printf '%s' "$label"
+}
+
+# c1541 splits the disk name from the two-character id on the first comma.
+disk_format_name() {
+  printf '%s,64' "$(media_label "$1" 16)"
+}
+
+# Turn a save-dialog path into a new image path. A missing disk extension
+# becomes .d64. A missing tape extension becomes .tap. An existing regular
+# file is replaced only when the dialog returned that exact path.
+prepare_new_image() {
+  local image="${1:-}" kind="${2:-}"
+  [[ -n $image ]] || fail "no file name"
+  [[ $image != *$'\n'* ]] || fail "invalid file name"
+  [[ ${#image} -le 8192 ]] || fail "file name too long"
+  image="${image/#\~/$HOME}"
+  while [[ $image == */ ]]; do
+    image="${image%/}"
+  done
+  [[ -n $image ]] || fail "invalid file name"
+  if [[ $image != /* ]]; then
+    image="$PWD/$image"
+  fi
+
+  local parent base ext="" added=false
+  parent="$(/usr/bin/dirname -- "$image")"
+  base="$(/usr/bin/basename -- "$image")"
+  [[ -n $base && $base != . && $base != .. ]] || fail "invalid file name"
+  [[ -d $parent ]] || fail "folder not found: $parent"
+  parent="$(/usr/bin/realpath -e -- "$parent")"
+  image="$parent/$base"
+  if [[ $base == *.* && $base != .* ]]; then
+    ext="${base##*.}"
+    ext="${ext,,}"
+  fi
+  case "$kind" in
+  disk)
+    case "$ext" in
+    d64|g64|d71|d81|d80|d82) ;;
+    *)
+      image="${image}.d64"
+      ext="d64"
+      added=true
+      ;;
+    esac
+    ;;
+  tape)
+    case "$ext" in
+    tap) ;;
+    t64) fail "A blank tape is a .tap image. A .t64 cannot store a new program." ;;
+    *)
+      image="${image}.tap"
+      ext="tap"
+      added=true
+      ;;
+    esac
+    ;;
+  *) fail "unknown image kind" ;;
+  esac
+  base="$(/usr/bin/basename -- "$image")"
+  [[ ${#base} -le 255 && ${#image} -le 8192 ]] || fail "file name too long"
+  if [[ $added == true && -e $image ]]; then
+    fail "file already exists: $base"
+  fi
+  if [[ -L $image ]]; then
+    fail "not a regular file: $base"
+  fi
+  if [[ -e $image && ! -f $image ]]; then
+    fail "not a regular file: $base"
+  fi
+  printf '%s\n' "$image"
+}
+
+# mktemp is mode 0600. A disk or tape the user just named should follow umask.
+apply_create_mode() {
+  /usr/bin/python3 -I -S - "$1" <<'PY'
+import os, sys
+path = sys.argv[1]
+current = os.umask(0)
+os.umask(current)
+os.chmod(path, 0o666 & ~current)
+PY
+}
+
+create_blank_disk() {
+  local image="$1" ext label tmp out parent
+  ext="${image##*.}"
+  ext="${ext,,}"
+  label="$(disk_format_name "$image")"
+  need /usr/bin/c1541
+  parent="$(/usr/bin/dirname -- "$image")"
+  tmp="$(/usr/bin/mktemp --tmpdir="$parent" --suffix=".$ext" .omarchy64.XXXXXX)" || fail "could not create a disk image"
+  # c1541 writes a real formatted image (BAM and an empty directory).
+  # Its OPENCBM warning is on stdout; only surface that stream on failure.
+  if ! out="$(/usr/bin/c1541 -format "$label" "$ext" "$tmp" 2>&1)"; then
+    /usr/bin/rm -f -- "$tmp"
+    out="$(printf '%s\n' "$out" | /usr/bin/grep -v 'OPENCBM:' || true)"
+    out="${out//$'\n'/ }"
+    out="${out:0:240}"
+    fail "could not create disk${out:+: $out}"
+  fi
+  local size
+  size="$(/usr/bin/stat -c '%s' -- "$tmp" 2>/dev/null || echo 0)"
+  if [[ $size -lt 174848 ]]; then
+    /usr/bin/rm -f -- "$tmp"
+    fail "could not create disk"
+  fi
+  if ! /usr/bin/mv -f -- "$tmp" "$image"; then
+    /usr/bin/rm -f -- "$tmp"
+    fail "could not save disk"
+  fi
+  apply_create_mode "$image"
+}
+
+create_blank_tape() {
+  local image="$1" tmp video video_byte=0 state
+  state="$(read_state)"
+  video="$(/usr/bin/jq -r '.video // "pal"' <<<"$state")"
+  if [[ $video == ntsc ]]; then
+    video_byte=1
+  fi
+  tmp="$(/usr/bin/mktemp --tmpdir="$(/usr/bin/dirname -- "$image")" --suffix=.tap .omarchy64.XXXXXX)" || fail "could not create a tape image"
+  # VICE tap_create writes 24 bytes: a 20-byte header whose data-size field
+  # is 4, plus 4 payload bytes. tap_open rejects a shorter file. This is a
+  # writable cassette; a .t64 cannot store SAVE.
+  if ! /usr/bin/python3 -I -S - "$tmp" "$video_byte" <<'PY'
+import sys
+path = sys.argv[1]
+video = int(sys.argv[2])
+if video not in (0, 1):
+    video = 0
+hdr = bytearray(24)
+hdr[0:12] = b"C64-TAPE-RAW"
+hdr[12] = 1
+hdr[13] = 0
+hdr[14] = video
+hdr[16:20] = (4).to_bytes(4, "little")
+with open(path, "wb") as fh:
+    fh.write(hdr)
+PY
+  then
+    /usr/bin/rm -f -- "$tmp"
+    fail "could not create tape"
+  fi
+  if [[ $(/usr/bin/stat -c '%s' -- "$tmp") -ne 24 ]]; then
+    /usr/bin/rm -f -- "$tmp"
+    fail "could not create tape"
+  fi
+  if ! /usr/bin/mv -f -- "$tmp" "$image"; then
+    /usr/bin/rm -f -- "$tmp"
+    fail "could not save tape"
+  fi
+  apply_create_mode "$image"
+}
+
+cmd_blank_disk() {
+  local image
+  image="$(prepare_new_image "${1:-}" disk)" || exit 1
+  create_blank_disk "$image"
+  cmd_drive8 "$image"
+}
+
+cmd_blank_tape() {
+  local image
+  image="$(prepare_new_image "${1:-}" tape)" || exit 1
+  create_blank_tape "$image"
+  cmd_tape "$image"
+}
+
+# tapectrl is the monitor command for the datasette keys. 0-4 are the same
+# in the monitor's default hex radix and in decimal. Record (4) closes the
+# play switch as well as the record key.
+cmd_tape_ctrl() {
+  local action="${1:-}" code=""
+  case "$action" in
+  play) code=1 ;;
+  record) code=4 ;;
+  stop) code=0 ;;
+  rewind) code=3 ;;
+  *) fail "tape control must be play, record, stop, or rewind" ;;
+  esac
+  local state pid tape ext
+  state="$(read_state)"
+  pid="$(running_pid "$state" || true)"
+  [[ -n ${pid:-} ]] || fail "VICE is not running"
+  tape="$(/usr/bin/jq -r '.tape // empty' <<<"$state")"
+  tape="${tape/#\~/$HOME}"
+  [[ -n $tape && -f $tape ]] || fail "no tape in the datasette"
+  ext="${tape##*.}"
+  ext="${ext,,}"
+  if [[ $action == record && $ext != tap ]]; then
+    fail "Record stores into a .tap image"
+  fi
+  local -a cmds=()
+  if [[ $ext == t64 ]]; then
+    # Without this trap the kernal bit-bangs an empty datasette and the
+    # screen stays blue. VICE leaves TrapDevice1 off unless autostart turns it on.
+    cmds+=("resourceset TrapDevice1 1")
+    if [[ $action == rewind ]]; then
+      cmds+=("attach \"$(monitor_quote "$tape")\" 1")
+    else
+      cmds+=("tapectrl ${code}")
+    fi
+  else
+    cmds+=("tapectrl ${code}")
+  fi
+  # Play, Record, Stop, and Rewind leave the emulator at normal speed so
+  # a manual load or save takes as long as a real datasette. LOAD TAPE
+  # still passes -autostart-warp.
+  vice_monitor "${cmds[@]}" || fail "VICE did not take the tape control"
   emit_status
 }
 
@@ -1108,7 +1344,7 @@ cmd_eject_cart() {
 
 cmd_browse() {
   need /usr/bin/zenity
-  local state dir picked title filter start current parent
+  local state dir picked title filter start current="" parent save=false
   state="$(read_state)"
   dir="$(games_dir_from "$state")"
   /usr/bin/mkdir -p "$dir"
@@ -1119,10 +1355,30 @@ cmd_browse() {
     filter="Disk images | *.d64 *.D64 *.g64 *.G64 *.d71 *.D71 *.d81 *.D81 *.d80 *.D80 *.d82 *.D82"
     current="$(/usr/bin/jq -r '.drive8 // empty' <<<"$state")"
     ;;
+  --new-disk)
+    title="Blank disk"
+    filter="Disk images | *.d64 *.D64 *.g64 *.G64 *.d71 *.D71 *.d81 *.D81 *.d80 *.D80 *.d82 *.D82"
+    save=true
+    if [[ -d "$dir/Disks" ]]; then
+      start="$dir/Disks/blank.d64"
+    else
+      start="$dir/blank.d64"
+    fi
+    ;;
   --tapes)
     title="Tape"
-    filter="Tape images | *.t64 *.T64"
+    filter="Tape images | *.tap *.TAP *.t64 *.T64"
     current="$(/usr/bin/jq -r '.tape // empty' <<<"$state")"
+    ;;
+  --new-tape)
+    title="Blank tape"
+    filter="Tape images | *.tap *.TAP"
+    save=true
+    if [[ -d "$dir/Tapes" ]]; then
+      start="$dir/Tapes/blank.tap"
+    else
+      start="$dir/blank.tap"
+    fi
     ;;
   --carts)
     title="Cartridge"
@@ -1138,29 +1394,37 @@ cmd_browse() {
     fi
     ;;
   esac
-  current="${current/#\~/$HOME}"
-  if [[ -n $current && -f $current ]]; then
-    # Open in the current image's folder with that file selected, so
-    # multi-disk games in a subdirectory are one click away.
-    start="$current"
-  else
-    parent="$(/usr/bin/dirname -- "$current")"
-    if [[ -n $current && -d $parent ]]; then
-      start="$parent/"
-    elif [[ ${1:-} == --carts && -d $dir/Carts ]]; then
-      start="$dir/Carts/"
-    elif [[ ${1:-} == --tapes && -d $dir/Tapes ]]; then
-      start="$dir/Tapes/"
-    elif [[ ${1:-} == --disks && -d $dir/Disks ]]; then
-      start="$dir/Disks/"
+  if [[ $save == false ]]; then
+    current="${current/#\~/$HOME}"
+    if [[ -n $current && -f $current ]]; then
+      # Open in the current image's folder with that file selected, so
+      # multi-disk games in a subdirectory are one click away.
+      start="$current"
+    else
+      parent="$(/usr/bin/dirname -- "$current")"
+      if [[ -n $current && -d $parent ]]; then
+        start="$parent/"
+      elif [[ ${1:-} == --carts && -d $dir/Carts ]]; then
+        start="$dir/Carts/"
+      elif [[ ${1:-} == --tapes && -d $dir/Tapes ]]; then
+        start="$dir/Tapes/"
+      elif [[ ${1:-} == --disks && -d $dir/Disks ]]; then
+        start="$dir/Disks/"
+      fi
     fi
   fi
+  local -a zenity=(
+    /usr/bin/zenity --file-selection
+    --title="$title"
+    --filename="$start"
+    --file-filter="$filter"
+    --file-filter="All files | *"
+  )
+  if [[ $save == true ]]; then
+    zenity+=(--save)
+  fi
   set +e
-  picked="$(/usr/bin/zenity --file-selection \
-    --title="$title" \
-    --filename="$start" \
-    --file-filter="$filter" \
-    --file-filter="All files | *" 2>/dev/null | /usr/bin/head -c 8193)"
+  picked="$("${zenity[@]}" 2>/dev/null | /usr/bin/head -c 8193)"
   local rc=$?
   set -e
   [[ $rc -eq 0 && -n $picked && ${#picked} -le 8192 ]] || exit 1
@@ -1293,8 +1557,11 @@ pause) cmd_pause ;;
 reset) cmd_reset ;;
 drive8) cmd_drive8 "${1:-}" ;;
 eject) cmd_eject ;;
+blank-disk) cmd_blank_disk "${1:-}" ;;
 tape) cmd_tape "${1:-}" ;;
 eject-tape) cmd_eject_tape ;;
+blank-tape) cmd_blank_tape "${1:-}" ;;
+tape-ctrl) cmd_tape_ctrl "${1:-}" ;;
 cart) cmd_cart "${1:-}" ;;
 eject-cart) cmd_eject_cart ;;
 quit) quit_emu; emit_status ;;
